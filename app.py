@@ -22,6 +22,7 @@ ITEM_MASTER_FILE = "item_master.csv"
 FOUNDRY_MASTER_FILE = "foundry_master.csv"
 PO_FILE = "purchase_orders.csv"
 CHALLAN_FILE = "challan_entries.csv"
+PIG_IRON_FILE = "pig_iron_inward.csv"
 
 # --- DATA INITIALIZATION ---
 def load_data():
@@ -33,7 +34,14 @@ def load_data():
     if os.path.exists(FOUNDRY_MASTER_FILE):
         foundry_df = pd.read_csv(FOUNDRY_MASTER_FILE)
     else:
-        foundry_df = pd.DataFrame(columns=["Foundry Name", "GST ID", "Address", "Contact Person", "Mobile", "Pig Iron Opening Balance (kg)"])
+        foundry_df = pd.DataFrame(columns=[
+            "Foundry Name", "GST ID", "Address", "Contact Person", "Mobile", 
+            "Pig Iron Balance (kg)"
+        ])
+
+    # Backward compatibility column check
+    if "Pig Iron Opening Balance (kg)" in foundry_df.columns and "Pig Iron Balance (kg)" not in foundry_df.columns:
+        foundry_df.rename(columns={"Pig Iron Opening Balance (kg)": "Pig Iron Balance (kg)"}, inplace=True)
 
     if os.path.exists(PO_FILE):
         po_df = pd.read_csv(PO_FILE)
@@ -53,9 +61,18 @@ def load_data():
             "Weight Variation (kg)", "Status"
         ])
 
-    return item_df, foundry_df, po_df, challan_df
+    if os.path.exists(PIG_IRON_FILE):
+        pig_iron_df = pd.read_csv(PIG_IRON_FILE)
+    else:
+        pig_iron_df = pd.DataFrame(columns=[
+            "Date", "Vendor Name", "Bill No", "Vehicle No", "Pig Iron Weight (kg)",
+            "Qty (Pcs/Bags)", "SGST Amount (Rs)", "CGST Amount (Rs)", "IGST Amount (Rs)",
+            "Round Off (Rs)", "Total Amount (Rs)", "Unloaded Foundry"
+        ])
 
-item_df, foundry_df, po_df, challan_df = load_data()
+    return item_df, foundry_df, po_df, challan_df, pig_iron_df
+
+item_df, foundry_df, po_df, challan_df, pig_iron_df = load_data()
 
 # Session State Initializations
 if "po_basket" not in st.session_state:
@@ -69,6 +86,7 @@ st.title("🏭 Pulley Foundry & Weight Loss Management ERP")
 menu = st.sidebar.radio("Navigation Menu", [
     "📊 Executive Dashboard",
     "📝 Masters (Item & Foundry)",
+    "🪵 Pig Iron Raw Material Inward",
     "📑 Create Purchase Order",
     "🚚 Challan Entry against PO",
     "📈 Foundry Pending Reports & Timeline",
@@ -95,6 +113,15 @@ if menu == "📊 Executive Dashboard":
 
     st.markdown("---")
     
+    # Pig Iron Balance Card Overview
+    st.subheader("🪵 Live Pig Iron Running Balance at Foundries")
+    if not foundry_df.empty:
+        st.dataframe(foundry_df[["Foundry Name", "Pig Iron Balance (kg)", "Contact Person", "Mobile"]], use_container_width=True)
+    else:
+        st.info("No foundry details configured.")
+
+    st.markdown("---")
+
     col_a, col_b = st.columns(2)
     with col_a:
         st.subheader("Overweight Loss by Foundry")
@@ -167,7 +194,7 @@ elif menu == "📝 Masters (Item & Foundry)":
 
     # FOUNDRY MASTER
     with m_tab2:
-        st.subheader("Manage Foundry Details & Pig Iron Balance")
+        st.subheader("Manage Foundry Details & Pig Iron Stock")
         with st.form("foundry_form"):
             fc1, fc2 = st.columns(2)
             with fc1:
@@ -177,17 +204,17 @@ elif menu == "📝 Masters (Item & Foundry)":
             with fc2:
                 f_contact = st.text_input("Contact Person Name")
                 f_mobile = st.text_input("Mobile / Phone Number")
-                f_pig_iron = st.number_input("Pig Iron Opening Balance Given (kg)", min_value=0.0, step=10.0)
+                f_pig_iron = st.number_input("Pig Iron Initial Opening Balance (kg)", min_value=0.0, step=10.0)
 
             submit_foundry = st.form_submit_button("Save Foundry Details")
 
             if submit_foundry and f_name:
                 if f_name in foundry_df["Foundry Name"].values:
-                    foundry_df.loc[foundry_df["Foundry Name"] == f_name] = [f_name, f_gst, f_address, f_contact, f_mobile, f_pig_iron]
+                    foundry_df.loc[foundry_df["Foundry Name"] == f_name, ["GST ID", "Address", "Contact Person", "Mobile"]] = [f_gst, f_address, f_contact, f_mobile]
                 else:
                     new_f = pd.DataFrame([{
                         "Foundry Name": f_name, "GST ID": f_gst, "Address": f_address,
-                        "Contact Person": f_contact, "Mobile": f_mobile, "Pig Iron Opening Balance (kg)": f_pig_iron
+                        "Contact Person": f_contact, "Mobile": f_mobile, "Pig Iron Balance (kg)": f_pig_iron
                     }])
                     foundry_df = pd.concat([foundry_df, new_f], ignore_index=True)
                 foundry_df.to_csv(FOUNDRY_MASTER_FILE, index=False)
@@ -198,7 +225,84 @@ elif menu == "📝 Masters (Item & Foundry)":
         st.dataframe(foundry_df, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 3. CREATE PURCHASE ORDER & PDF GENERATION
+# 3. PIG IRON RAW MATERIAL INWARD SECTION
+# -----------------------------------------------------------------------------
+elif menu == "🪵 Pig Iron Raw Material Inward":
+    st.header("Pig Iron Purchase & Foundry Unloading Entry")
+
+    if foundry_df.empty:
+        st.warning("Please configure at least one Foundry in Foundry Master before entering Pig Iron receipts.")
+    else:
+        st.subheader("1. Record Vendor Delivery & Unloading Details")
+        
+        with st.form("pig_iron_entry_form"):
+            pi_col1, pi_col2, pi_col3 = st.columns(3)
+            with pi_col1:
+                inward_date = st.date_input("Inward Receipt Date", date.today())
+                vendor_name = st.text_input("Vendor Name (Supplied By)")
+                bill_no = st.text_input("Bill / Invoice Number")
+            with pi_col2:
+                vehicle_no = st.text_input("Vehicle Number")
+                pi_weight = st.number_input("Pig Iron Net Weight (kg)", min_value=0.0, step=1.0)
+                pi_qty = st.number_input("Quantity (Pcs/Bags)", min_value=0, step=1)
+            with pi_col3:
+                unload_foundry = st.selectbox("Unloaded at Foundry Destination", foundry_df["Foundry Name"].unique())
+                base_amount = st.number_input("Base Value (Rs)", min_value=0.0, step=100.0)
+                round_off = st.number_input("Round Off (R/O Rs)", value=0.0, step=0.1)
+
+            st.markdown("---")
+            st.write("**Tax Calculation:**")
+            tx1, tx2, tx3 = st.columns(3)
+            with tx1:
+                sgst_val = st.number_input("SGST Amount (Rs)", min_value=0.0, step=10.0)
+            with tx2:
+                cgst_val = st.number_input("CGST Amount (Rs)", min_value=0.0, step=10.0)
+            with tx3:
+                igst_val = st.number_input("IGST Amount (Rs)", min_value=0.0, step=10.0)
+
+            total_bill_amt = round(base_amount + sgst_val + cgst_val + igst_val + round_off, 2)
+            st.info(f"**Total Calculated Invoice Value:** Rs. {total_bill_amt:,.2f}")
+
+            submit_pi = st.form_submit_button("💾 Save Pig Iron Inward & Update Foundry Stock")
+
+            if submit_pi:
+                if not vendor_name or not bill_no or pi_weight <= 0:
+                    st.error("Please enter Vendor Name, Bill Number, and valid Pig Iron Weight.")
+                else:
+                    new_pi_entry = pd.DataFrame([{
+                        "Date": str(inward_date),
+                        "Vendor Name": vendor_name,
+                        "Bill No": bill_no,
+                        "Vehicle No": vehicle_no,
+                        "Pig Iron Weight (kg)": pi_weight,
+                        "Qty (Pcs/Bags)": pi_qty,
+                        "SGST Amount (Rs)": sgst_val,
+                        "CGST Amount (Rs)": cgst_val,
+                        "IGST Amount (Rs)": igst_val,
+                        "Round Off (Rs)": round_off,
+                        "Total Amount (Rs)": total_bill_amt,
+                        "Unloaded Foundry": unload_foundry
+                    }])
+
+                    pig_iron_df = pd.concat([pig_iron_df, new_pi_entry], ignore_index=True)
+                    pig_iron_df.to_csv(PIG_IRON_FILE, index=False)
+
+                    # AUTOMATICALLY ADD WEIGHT TO FOUNDRY PIG IRON BALANCE
+                    foundry_df.loc[foundry_df["Foundry Name"] == unload_foundry, "Pig Iron Balance (kg)"] += pi_weight
+                    foundry_df.to_csv(FOUNDRY_MASTER_FILE, index=False)
+
+                    st.success(f"Added {pi_weight} kg Pig Iron to '{unload_foundry}' balance!")
+                    st.rerun()
+
+        st.markdown("---")
+        st.subheader("2. Pig Iron Inward Transaction History")
+        if pig_iron_df.empty:
+            st.info("No Pig Iron inward entries recorded yet.")
+        else:
+            st.dataframe(pig_iron_df, use_container_width=True)
+
+# -----------------------------------------------------------------------------
+# 4. CREATE PURCHASE ORDER & PDF GENERATION
 # -----------------------------------------------------------------------------
 elif menu == "📑 Create Purchase Order":
     st.header("Generate Purchase Order (PO)")
@@ -206,7 +310,6 @@ elif menu == "📑 Create Purchase Order":
     if foundry_df.empty or item_df.empty:
         st.warning("Please configure both Foundry Master and Item Master before generating a PO.")
     else:
-        # Header Info
         st.subheader("1. PO Header")
         p_col1, p_col2, p_col3 = st.columns(3)
         with p_col1:
@@ -231,7 +334,6 @@ elif menu == "📑 Create Purchase Order":
             st.write(" ")
             add_po_item = st.button("➕ Add Item to PO")
 
-        # Auto fetch standard weight
         std_w_pc = item_df.loc[item_df["Item Size"] == selected_item, "Standard Weight per Pc (kg)"].values[0]
         expected_total_kg = round(ordered_pcs * std_w_pc, 2)
         item_total_amount = round(expected_total_kg * rate_per_kg, 2)
@@ -254,7 +356,6 @@ elif menu == "📑 Create Purchase Order":
             })
             st.success(f"Added {selected_item} to draft PO!")
 
-        # Basket Display & Finalization
         if st.session_state.po_basket:
             st.subheader("Items in Current Purchase Order")
             basket_df = pd.DataFrame(st.session_state.po_basket)
@@ -283,7 +384,6 @@ elif menu == "📑 Create Purchase Order":
                 po_df.to_csv(PO_FILE, index=False)
                 st.success(f"Purchase Order {po_number} created successfully!")
                 
-                # Option to Download PDF
                 if REPORTLAB_AVAILABLE:
                     pdf_buffer = io.BytesIO()
                     doc = SimpleDocTemplate(pdf_buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
@@ -327,7 +427,7 @@ elif menu == "📑 Create Purchase Order":
                 st.session_state.po_basket = []
 
 # -----------------------------------------------------------------------------
-# 4. CHALLAN ENTRY AGAINST PO (AUTOMATIC WEIGHT VARIATION & PENDING DEDUCTION)
+# 5. CHALLAN ENTRY AGAINST PO (AUTO WEIGHT VARIATION & PIG IRON DEDUCTION)
 # -----------------------------------------------------------------------------
 elif menu == "🚚 Challan Entry against PO":
     st.header("Challan Entry & Material Receipt")
@@ -348,11 +448,13 @@ elif menu == "🚚 Challan Entry against PO":
             with ch_col3:
                 ch_date = st.date_input("Challan Receipt Date", date.today())
 
-            # Get PO Items
             po_items = po_df[(po_df["PO No"] == selected_po) & (po_df["Pending Qty (Pcs)"] > 0)]
             foundry_for_po = po_items["Foundry Name"].values[0] if not po_items.empty else ""
 
-            st.write(f"**Foundry:** {foundry_for_po}")
+            # Show live Pig Iron balance for selected foundry
+            curr_pi_bal = foundry_df.loc[foundry_df["Foundry Name"] == foundry_for_po, "Pig Iron Balance (kg)"].values[0] if foundry_for_po in foundry_df["Foundry Name"].values else 0.0
+
+            st.write(f"**Foundry:** {foundry_for_po} | **Current Available Pig Iron Balance:** `{curr_pi_bal:.2f} kg`")
             st.markdown("---")
 
             st.subheader("2. Receive Items against PO")
@@ -406,7 +508,7 @@ elif menu == "🚚 Challan Entry against PO":
                 x3.metric("Weight Loss / Gain Variance", f"{c_tot_var:+.2f} kg", 
                           delta_color="inverse" if c_tot_var > 0 else "normal")
 
-                if st.button("💾 Submit Challan & Update PO Balances", type="primary"):
+                if st.button("💾 Submit Challan, Update PO & Deduct Pig Iron Balance", type="primary"):
                     if not ch_number:
                         st.error("Please provide a Challan Number.")
                     else:
@@ -414,33 +516,39 @@ elif menu == "🚚 Challan Entry against PO":
                         challan_df = pd.concat([challan_df, pd.DataFrame(st.session_state.challan_basket)], ignore_index=True)
                         challan_df.to_csv(CHALLAN_FILE, index=False)
 
-                        # Auto-Deduct from PO Pending Balances
+                        # Auto-Deduct PO Balances AND Deduct Actual Casting Weight from Pig Iron Balance
+                        total_act_weight_delivered = 0.0
+
                         for entry in st.session_state.challan_basket:
                             po_mask = (po_df["PO No"] == entry["PO No"]) & (po_df["Item Size"] == entry["Item Size"])
                             po_df.loc[po_mask, "Recd Qty (Pcs)"] += entry["Qty (Pcs)"]
                             po_df.loc[po_mask, "Pending Qty (Pcs)"] -= entry["Qty (Pcs)"]
 
-                            # Check if line item complete
+                            total_act_weight_delivered += entry["Actual Weight (kg)"]
+
                             if po_df.loc[po_mask, "Pending Qty (Pcs)"].values[0] <= 0:
                                 po_df.loc[po_mask, "Completion Date"] = str(ch_date)
 
-                        # Check if entire PO closed
+                        # AUTOMATICALLY DEDUCT ACTUAL WEIGHT FROM FOUNDRY PIG IRON STOCK
+                        foundry_df.loc[foundry_df["Foundry Name"] == foundry_for_po, "Pig Iron Balance (kg)"] -= total_act_weight_delivered
+                        foundry_df.to_csv(FOUNDRY_MASTER_FILE, index=False)
+
                         po_sub = po_df[po_df["PO No"] == selected_po]
                         if (po_sub["Pending Qty (Pcs)"] <= 0).all():
                             po_df.loc[po_df["PO No"] == selected_po, "Status"] = "CLOSED"
 
                         po_df.to_csv(PO_FILE, index=False)
                         st.session_state.challan_basket = []
-                        st.success("Challan submitted successfully! PO balances updated.")
+                        st.success(f"Challan submitted! Deducted {total_act_weight_delivered:.2f} kg Pig Iron from {foundry_for_po}'s balance.")
                         st.rerun()
 
 # -----------------------------------------------------------------------------
-# 5. FOUNDRY REPORTS, PENDING ORDERS & TIMELINE TRACKING
+# 6. FOUNDRY REPORTS, PENDING ORDERS & TIMELINE TRACKING
 # -----------------------------------------------------------------------------
 elif menu == "📈 Foundry Pending Reports & Timeline":
     st.header("Foundry Ledger, Pending Orders & Timeline Analytics")
 
-    r_tab1, r_tab2, r_tab3 = st.tabs(["📦 Pending PO Status", "⏱️ Order Timeline & Fulfillment", "⚖️ Weight Variation Audit"])
+    r_tab1, r_tab2, r_tab3, r_tab4 = st.tabs(["📦 Pending PO Status", "⏱️ Order Timeline & Fulfillment", "⚖️ Weight Variation Audit", "🪵 Pig Iron Ledger"])
 
     # TAB 1: PENDING POs
     with r_tab1:
@@ -464,8 +572,6 @@ elif menu == "📈 Foundry Pending Reports & Timeline":
         else:
             po_timeline = po_df.copy()
             po_timeline["PO Date"] = pd.to_datetime(po_timeline["PO Date"])
-            
-            # Calculate Fulfillment Percentage
             po_timeline["Fulfillment %"] = round((po_timeline["Recd Qty (Pcs)"] / po_timeline["Ordered Qty (Pcs)"]) * 100, 1)
             
             st.dataframe(po_timeline[[
@@ -480,12 +586,19 @@ elif menu == "📈 Foundry Pending Reports & Timeline":
             st.info("No challan entries available.")
         else:
             st.dataframe(challan_df, use_container_width=True)
-
             total_excess = challan_df["Weight Variation (kg)"].sum()
             st.warning(f"⚠️ Total Financial Extra Material Purchased across all Challans: **{total_excess:+.2f} kg**")
 
+    # TAB 4: PIG IRON LEDGER
+    with r_tab4:
+        st.subheader("Pig Iron Inward Ledger")
+        if pig_iron_df.empty:
+            st.info("No pig iron entries recorded.")
+        else:
+            st.dataframe(pig_iron_df, use_container_width=True)
+
 # -----------------------------------------------------------------------------
-# 6. ITEM SIZE SPECIFIC REPORT & TIMELINE
+# 7. ITEM SIZE SPECIFIC REPORT & TIMELINE
 # -----------------------------------------------------------------------------
 elif menu == "🔍 Item Size Specific Report":
     st.header("Item Size Inspection & Casting History")
