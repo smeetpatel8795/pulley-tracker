@@ -2,7 +2,7 @@ import pandas as pd
 import streamlit as st
 import os
 import io
-from datetime import date
+from datetime import date, datetime
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -88,7 +88,6 @@ def generate_po_pdf(po_number, po_items_df):
     styles = getSampleStyleSheet()
 
     header_style = ParagraphStyle('HeaderStyle', parent=styles['Heading1'], fontSize=18, leading=22, alignment=1)
-    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=10, leading=14, alignment=1)
     
     story.append(Paragraph("PURCHASE ORDER", header_style))
     story.append(Spacer(1, 10))
@@ -206,24 +205,110 @@ menu = st.sidebar.radio("Go to Section:", [
 ])
 
 # ----------------------------------------------------
-# 1. EXECUTIVE DASHBOARD & REPORTS
+# 1. EXECUTIVE DASHBOARD & REPORTS (UPDATED)
 # ----------------------------------------------------
 if menu == "📊 Executive Dashboard & Reports":
     st.header("Executive Operational Dashboard")
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Item Masters", len(item_df))
-    with col2:
-        st.metric("Total Registered Foundries", len(foundry_df))
-    with col3:
+    now = datetime.now()
+    current_year = now.year
+    current_month = now.month
+    current_month_str = now.strftime('%B %Y')
+
+    # Calculate Total Pig Iron Stock On Hand (All Foundries)
+    total_opening_pig = foundry_df["Opening Pig Iron Balance (kg)"].sum() if not foundry_df.empty else 0.0
+    total_inward_pig = pig_iron_df["Pig Iron Weight (kg)"].sum() if not pig_iron_df.empty else 0.0
+    total_consumed_pig = challan_df["Actual Weight (kg)"].sum() if not challan_df.empty else 0.0
+    total_pig_on_hand = total_opening_pig + total_inward_pig - total_consumed_pig
+
+    # Calculate Current Month Casting Inward Purchase
+    if not challan_df.empty:
+        temp_ch = challan_df.copy()
+        temp_ch["Date_dt"] = pd.to_datetime(temp_ch["Date"], errors='coerce')
+        cur_m_challan = temp_ch[(temp_ch["Date_dt"].dt.year == current_year) & (temp_ch["Date_dt"].dt.month == current_month)]
+        cur_m_casting_weight = cur_m_challan["Actual Weight (kg)"].sum()
+    else:
+        cur_m_casting_weight = 0.0
+
+    # KPI Top Cards Row 1
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    with kpi1:
+        st.metric("Total Pig Iron On Hand", f"{total_pig_on_hand:,.2f} kg")
+    with kpi2:
+        st.metric(f"Casting Inward ({current_month_str})", f"{cur_m_casting_weight:,.2f} kg")
+    with kpi3:
         active_pos = po_df[po_df["Status"] == "OPEN"]["PO No"].nunique() if not po_df.empty else 0
         st.metric("Active Open POs", active_pos)
-    with col4:
+    with kpi4:
         total_var = challan_df["Weight Variation (kg)"].sum() if not challan_df.empty else 0.0
         st.metric("Total Weight Variance Loss", f"{total_var:+.2f} kg", delta_color="inverse" if total_var > 0 else "normal")
 
     st.markdown("---")
+
+    # ----------------------------------------------------
+    # DASHBOARD VISUAL ANALYTICS & CHARTS
+    # ----------------------------------------------------
+    st.subheader("📈 Real-Time Material & Casting Analytics")
+
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.markdown(f"**Foundry-wise Casting Inward — {current_month_str} (in KGs)**")
+        if not challan_df.empty:
+            temp_ch = challan_df.copy()
+            temp_ch["Date_dt"] = pd.to_datetime(temp_ch["Date"], errors='coerce')
+            cur_month_df = temp_ch[(temp_ch["Date_dt"].dt.year == current_year) & (temp_ch["Date_dt"].dt.month == current_month)]
+            
+            if not cur_month_df.empty:
+                f_cur_m = cur_month_df.groupby("Foundry Name")["Actual Weight (kg)"].sum().reset_index()
+                f_cur_m.columns = ["Foundry Name", "Inward Weight (kg)"]
+                st.bar_chart(f_cur_m.set_index("Foundry Name"))
+            else:
+                st.info(f"No casting arrivals recorded in {current_month_str} yet.")
+        else:
+            st.info("No casting challans entered yet.")
+
+    with col_chart2:
+        st.markdown(f"**Current Year Pig Iron Purchases Month-wise ({current_year}) (in KGs)**")
+        if not pig_iron_df.empty:
+            temp_pig = pig_iron_df.copy()
+            temp_pig["Date_dt"] = pd.to_datetime(temp_pig["Date"], errors='coerce')
+            cur_yr_pig = temp_pig[temp_pig["Date_dt"].dt.year == current_year]
+            
+            if not cur_yr_pig.empty:
+                cur_yr_pig["Month_Num"] = cur_yr_pig["Date_dt"].dt.month
+                cur_yr_pig["Month_Name"] = cur_yr_pig["Date_dt"].dt.strftime('%b')
+                pig_m_group = cur_yr_pig.groupby(["Month_Num", "Month_Name"])["Pig Iron Weight (kg)"].sum().reset_index()
+                pig_m_group = pig_m_group.sort_values("Month_Num")
+                st.bar_chart(pig_m_group.set_index("Month_Name")["Pig Iron Weight (kg)"])
+            else:
+                st.info(f"No Pig Iron purchases recorded in {current_year} yet.")
+        else:
+            st.info("No Pig Iron inward records entered yet.")
+
+    st.markdown("---")
+
+    # Full Width Chart: Current Year Total Casting Inward Monthly Trend
+    st.markdown(f"**Current Year Total Casting Inward Monthly Trend ({current_year}) (in KGs)**")
+    if not challan_df.empty:
+        temp_ch = challan_df.copy()
+        temp_ch["Date_dt"] = pd.to_datetime(temp_ch["Date"], errors='coerce')
+        cur_yr_ch = temp_ch[temp_ch["Date_dt"].dt.year == current_year]
+
+        if not cur_yr_ch.empty:
+            cur_yr_ch["Month_Num"] = cur_yr_ch["Date_dt"].dt.month
+            cur_yr_ch["Month_Name"] = cur_yr_ch["Date_dt"].dt.strftime('%b')
+            ch_m_group = cur_yr_ch.groupby(["Month_Num", "Month_Name"])["Actual Weight (kg)"].sum().reset_index()
+            ch_m_group = ch_m_group.sort_values("Month_Num")
+            st.line_chart(ch_m_group.set_index("Month_Name")["Actual Weight (kg)"])
+        else:
+            st.info(f"No casting receipts recorded in {current_year} yet.")
+    else:
+        st.info("No casting challans entered yet.")
+
+    st.markdown("---")
+
+    # Tables Tab View
     tab_d1, tab_d2, tab_d3 = st.tabs(["🐷 Foundry Pig Iron Stocks", "📋 Pending Orders by Foundry", "📐 Size-Wise Pending Orders"])
 
     with tab_d1:
@@ -555,7 +640,6 @@ elif menu == "🚚 Challan Entry (Incoming Castings)":
                         }
                         new_ch_rows.append(full_ch)
 
-                        # Update PO Quantities & Status
                         match = (po_df["PO No"] == ch_po) & (po_df["Item Size"] == row["Item Size"])
                         if match.any():
                             curr_rec = po_df.loc[match, "Received Qty (Pcs)"].values[0]
@@ -600,18 +684,15 @@ elif menu == "📄 Pig Iron Foundry Statement & PDF":
             start_date = date(2020, 1, 1)
             end_date = date.today()
 
-        # Build Chronological Ledger
         opening = foundry_df[foundry_df["Foundry Name"] == sel_f]["Opening Pig Iron Balance (kg)"].values[0]
         
         ledger_entries = []
-        # Inwards
         f_pigs = pig_iron_df[pig_iron_df["Unloaded Foundry"] == sel_f]
         for _, r in f_pigs.iterrows():
             ledger_entries.append({
                 "Date": r["Date"], "Type": "Pig Iron Inward", "Reference": f"Bill: {r['Bill/Invoice No']}",
                 "Inward (kg)": r["Pig Iron Weight (kg)"], "Outward (kg)": 0.0
             })
-        # Outwards (Castings)
         f_casts = challan_df[challan_df["Foundry Name"] == sel_f]
         for _, r in f_casts.iterrows():
             ledger_entries.append({
@@ -624,7 +705,6 @@ elif menu == "📄 Pig Iron Foundry Statement & PDF":
             ledger_df["Date"] = pd.to_datetime(ledger_df["Date"])
             ledger_df = ledger_df.sort_values("Date").reset_index(drop=True)
 
-            # Apply Running Balance
             bal = opening
             running_bals = []
             for _, r in ledger_df.iterrows():
@@ -633,7 +713,6 @@ elif menu == "📄 Pig Iron Foundry Statement & PDF":
             ledger_df["Balance (kg)"] = running_bals
             ledger_df["Date"] = ledger_df["Date"].dt.strftime('%Y-%m-%d')
 
-            # Filter by date for display & PDF
             mask = (pd.to_datetime(ledger_df["Date"]) >= pd.to_datetime(start_date)) & (pd.to_datetime(ledger_df["Date"]) <= pd.to_datetime(end_date))
             filtered_ledger = ledger_df[mask]
 
