@@ -1,0 +1,14 @@
+{
+    "admin": {
+        "password": "admin123",
+        "name": "System Director",
+        "department": "Admin",
+        "rights": [
+            "User Management",
+            "Purchase",
+            "Production",
+            "Sales",
+            "Accounts"
+        ]
+    }
+}
