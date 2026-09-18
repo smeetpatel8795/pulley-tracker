@@ -87,6 +87,7 @@ menu = st.sidebar.radio("Navigation Menu", [
     "📊 Executive Dashboard",
     "📝 Masters (Item & Foundry)",
     "🪵 Pig Iron Raw Material Inward",
+    "📄 Pig Iron Foundry Statement & PDF",
     "📑 Create Purchase Order",
     "🚚 Challan Entry against PO",
     "📈 Foundry Pending Reports & Timeline",
@@ -302,7 +303,148 @@ elif menu == "🪵 Pig Iron Raw Material Inward":
             st.dataframe(pig_iron_df, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 4. CREATE PURCHASE ORDER & PDF GENERATION
+# 4. PIG IRON FOUNDRY STATEMENT & PERIODIC PDF REPORT
+# -----------------------------------------------------------------------------
+elif menu == "📄 Pig Iron Foundry Statement & PDF":
+    st.header("Foundry Pig Iron Statement & Running Balance Ledger")
+
+    if foundry_df.empty:
+        st.warning("Please configure Foundry Master first.")
+    else:
+        st.subheader("1. Report Filters")
+        rf1, rf2, rf3 = st.columns([3, 2, 2])
+        with rf1:
+            rep_foundry = st.selectbox("Select Foundry", foundry_df["Foundry Name"].unique())
+        with rf2:
+            period_type = st.radio("Select Period", ["All Time (Start to Date)", "Custom Date Range"], horizontal=True)
+        with rf3:
+            if period_type == "Custom Date Range":
+                d_start = st.date_input("Start Date", date(2025, 1, 1))
+                d_end = st.date_input("End Date", date.today())
+            else:
+                d_start = None
+                d_end = None
+
+        # Gather Inwards for Foundry
+        f_inwards = pig_iron_df[pig_iron_df["Unloaded Foundry"] == rep_foundry].copy() if not pig_iron_df.empty else pd.DataFrame()
+        if not f_inwards.empty:
+            f_inwards["Type"] = "PIG IRON INWARD (+)"
+            f_inwards["Ref/Bill No"] = f_inwards["Bill No"]
+            f_inwards["Inward (kg)"] = f_inwards["Pig Iron Weight (kg)"]
+            f_inwards["Outward (kg)"] = 0.0
+            f_inwards["Details"] = "Vendor: " + f_inwards["Vendor Name"].fillna("") + " | Veh: " + f_inwards["Vehicle No"].fillna("")
+            f_inwards = f_inwards[["Date", "Type", "Ref/Bill No", "Details", "Inward (kg)", "Outward (kg)"]]
+
+        # Gather Outwards (Castings Received) for Foundry
+        f_outwards = challan_df[challan_df["Foundry Name"] == rep_foundry].copy() if not challan_df.empty else pd.DataFrame()
+        if not f_outwards.empty:
+            f_outwards["Date"] = f_outwards["Challan Date"]
+            f_outwards["Type"] = "CASTING CONSUMPTION (-)"
+            f_outwards["Ref/Bill No"] = f_outwards["Challan No"]
+            f_outwards["Inward (kg)"] = 0.0
+            f_outwards["Outward (kg)"] = f_outwards["Actual Weight (kg)"]
+            f_outwards["Details"] = "Item: " + f_outwards["Item Size"].fillna("") + " | Pcs: " + f_outwards["Qty (Pcs)"].astype(str)
+            f_outwards = f_outwards[["Date", "Type", "Ref/Bill No", "Details", "Inward (kg)", "Outward (kg)"]]
+
+        # Merge Transactions
+        combined_ledger = pd.concat([f_inwards, f_outwards], ignore_index=True)
+
+        if not combined_ledger.empty:
+            combined_ledger["Date_dt"] = pd.to_datetime(combined_ledger["Date"])
+            combined_ledger.sort_values(by="Date_dt", ascending=True, inplace=True)
+
+            # Date Range Filter Applied
+            if period_type == "Custom Date Range" and d_start and d_end:
+                combined_ledger = combined_ledger[(combined_ledger["Date_dt"].dt.date >= d_start) & (combined_ledger["Date_dt"].dt.date <= d_end)]
+
+            # Calculate Running Balance
+            running_bal = 0.0
+            balances = []
+            for _, r in combined_ledger.iterrows():
+                running_bal += r["Inward (kg)"] - r["Outward (kg)"]
+                balances.append(round(running_bal, 2))
+            combined_ledger["Running Balance (kg)"] = balances
+
+        st.markdown("---")
+        st.subheader(f"2. Pig Iron Ledger Statement: {rep_foundry}")
+
+        tot_inward_kg = combined_ledger["Inward (kg)"].sum() if not combined_ledger.empty else 0.0
+        tot_outward_kg = combined_ledger["Outward (kg)"].sum() if not combined_ledger.empty else 0.0
+        current_bal_kg = foundry_df.loc[foundry_df["Foundry Name"] == rep_foundry, "Pig Iron Balance (kg)"].values[0]
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Total Pig Iron Received (+)", f"{tot_inward_kg:,.2f} kg")
+        k2.metric("Total Casting Consumption (-)", f"{tot_outward_kg:,.2f} kg")
+        k3.metric("Current Available Stock Balance", f"{current_bal_kg:,.2f} kg")
+
+        if combined_ledger.empty:
+            st.info(f"No transaction records found for {rep_foundry} within the selected timeframe.")
+        else:
+            display_ledger = combined_ledger.drop(columns=["Date_dt"])
+            st.dataframe(display_ledger, use_container_width=True)
+
+            # Generate PDF Download Button
+            if REPORTLAB_AVAILABLE:
+                st.markdown("---")
+                if st.button("📄 Export Pig Iron Statement to PDF"):
+                    pdf_buf = io.BytesIO()
+                    doc = SimpleDocTemplate(pdf_buf, pagesize=A4, rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
+                    styles = getSampleStyleSheet()
+                    story = []
+
+                    story.append(Paragraph(f"<b>PIG IRON LEDGER STATEMENT</b>", styles['Title']))
+                    story.append(Paragraph(f"<b>Foundry Name:</b> {rep_foundry}", styles['Heading2']))
+                    date_str = f"{d_start} to {d_end}" if period_type == "Custom Date Range" else "All Time (Start to Date)"
+                    story.append(Paragraph(f"<b>Period:</b> {date_str} | <b>Generated Date:</b> {date.today()}", styles['Normal']))
+                    story.append(Spacer(1, 10))
+
+                    summary_table = [
+                        ["Total Inward (+)", "Total Consumption (-)", "Current Balance Stock"],
+                        [f"{tot_inward_kg:,.2f} kg", f"{tot_outward_kg:,.2f} kg", f"{current_bal_kg:,.2f} kg"]
+                    ]
+                    st_table = Table(summary_table, colWidths=[160, 160, 160])
+                    st_table.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#333333")),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
+                    ]))
+                    story.append(st_table)
+                    story.append(Spacer(1, 15))
+
+                    table_data = [["Date", "Type", "Ref No", "Details", "In (+)", "Out (-)", "Balance"]]
+                    for _, r in display_ledger.iterrows():
+                        table_data.append([
+                            str(r["Date"]), str(r["Type"]), str(r["Ref/Bill No"]), 
+                            str(r["Details"])[:28], f"{r['Inward (kg)']:.1f}", 
+                            f"{r['Outward (kg)']:.1f}", f"{r['Running Balance (kg)']:.1f}"
+                        ])
+
+                    t_led = Table(table_data, colWidths=[65, 85, 65, 120, 55, 55, 65])
+                    t_led.setStyle(TableStyle([
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1E88E5")),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
+                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0,0), (-1,-1), 8),
+                        ('BOTTOMPADDING', (0,0), (-1,0), 4),
+                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
+                    ]))
+                    story.append(t_led)
+
+                    doc.build(story)
+                    pdf_bytes = pdf_buf.getvalue()
+
+                    st.download_button(
+                        label="💾 Download PDF Statement",
+                        data=pdf_bytes,
+                        file_name=f"PigIron_Statement_{rep_foundry.replace(' ', '_')}.pdf",
+                        mime="application/pdf"
+                    )
+
+# -----------------------------------------------------------------------------
+# 5. CREATE PURCHASE ORDER & PDF GENERATION
 # -----------------------------------------------------------------------------
 elif menu == "📑 Create Purchase Order":
     st.header("Generate Purchase Order (PO)")
@@ -427,7 +569,7 @@ elif menu == "📑 Create Purchase Order":
                 st.session_state.po_basket = []
 
 # -----------------------------------------------------------------------------
-# 5. CHALLAN ENTRY AGAINST PO (AUTO WEIGHT VARIATION & PIG IRON DEDUCTION)
+# 6. CHALLAN ENTRY AGAINST PO (AUTO WEIGHT VARIATION & PIG IRON DEDUCTION)
 # -----------------------------------------------------------------------------
 elif menu == "🚚 Challan Entry against PO":
     st.header("Challan Entry & Material Receipt")
@@ -543,7 +685,7 @@ elif menu == "🚚 Challan Entry against PO":
                         st.rerun()
 
 # -----------------------------------------------------------------------------
-# 6. FOUNDRY REPORTS, PENDING ORDERS & TIMELINE TRACKING
+# 7. FOUNDRY REPORTS, PENDING ORDERS & TIMELINE TRACKING
 # -----------------------------------------------------------------------------
 elif menu == "📈 Foundry Pending Reports & Timeline":
     st.header("Foundry Ledger, Pending Orders & Timeline Analytics")
@@ -598,7 +740,7 @@ elif menu == "📈 Foundry Pending Reports & Timeline":
             st.dataframe(pig_iron_df, use_container_width=True)
 
 # -----------------------------------------------------------------------------
-# 7. ITEM SIZE SPECIFIC REPORT & TIMELINE
+# 8. ITEM SIZE SPECIFIC REPORT & TIMELINE
 # -----------------------------------------------------------------------------
 elif menu == "🔍 Item Size Specific Report":
     st.header("Item Size Inspection & Casting History")
