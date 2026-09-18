@@ -71,7 +71,8 @@ menu = st.sidebar.radio("Navigation Menu", [
     "📝 Masters (Item & Foundry)",
     "📑 Create Purchase Order",
     "🚚 Challan Entry against PO",
-    "📈 Foundry Pending Reports & Timeline"
+    "📈 Foundry Pending Reports & Timeline",
+    "🔍 Item Size Specific Report"
 ])
 
 # -----------------------------------------------------------------------------
@@ -482,3 +483,59 @@ elif menu == "📈 Foundry Pending Reports & Timeline":
 
             total_excess = challan_df["Weight Variation (kg)"].sum()
             st.warning(f"⚠️ Total Financial Extra Material Purchased across all Challans: **{total_excess:+.2f} kg**")
+
+# -----------------------------------------------------------------------------
+# 6. ITEM SIZE SPECIFIC REPORT & TIMELINE
+# -----------------------------------------------------------------------------
+elif menu == "🔍 Item Size Specific Report":
+    st.header("Item Size Inspection & Casting History")
+
+    if item_df.empty:
+        st.warning("No items found in Item Master.")
+    else:
+        selected_size = st.selectbox("Select Item Size to Inspect", item_df["Item Size"].unique())
+
+        std_weight_info = item_df.loc[item_df["Item Size"] == selected_size, "Standard Weight per Pc (kg)"].values[0]
+        pattern_info = item_df.loc[item_df["Item Size"] == selected_size, "Pattern Type"].values[0]
+
+        m1, m2 = st.columns(2)
+        m1.info(f"**Pattern Type:** {pattern_info}")
+        m2.info(f"**Standard Weight per Pc:** {std_weight_info} kg")
+
+        st.markdown("---")
+        st.subheader(f"1. Casting Receipt History for '{selected_size}'")
+
+        if challan_df.empty or selected_size not in challan_df["Item Size"].values:
+            st.info(f"No castings received yet for item size: {selected_size}")
+        else:
+            size_challans = challan_df[challan_df["Item Size"] == selected_size].copy()
+
+            tot_recd_pcs = size_challans["Qty (Pcs)"].sum()
+            tot_recd_wt = size_challans["Actual Weight (kg)"].sum()
+            tot_wt_var = size_challans["Weight Variation (kg)"].sum()
+
+            s_col1, s_col2, s_col3 = st.columns(3)
+            s_col1.metric("Total Received Quantity", f"{tot_recd_pcs} Pcs")
+            s_col2.metric("Total Actual Weight Received", f"{tot_recd_wt:.2f} kg")
+            s_col3.metric("Net Weight Variance", f"{tot_wt_var:+.2f} kg", delta_color="inverse" if tot_wt_var > 0 else "normal")
+
+            st.dataframe(size_challans[[
+                "Challan Date", "Challan No", "Foundry Name", "PO No",
+                "Qty (Pcs)", "Actual Weight (kg)", "Expected Weight (kg)", 
+                "Weight Variation (kg)", "Status"
+            ]], use_container_width=True)
+
+        st.markdown("---")
+        st.subheader(f"2. Purchase Order Timeline for '{selected_size}'")
+
+        if po_df.empty or selected_size not in po_df["Item Size"].values:
+            st.info(f"No Purchase Orders generated for item size: {selected_size}")
+        else:
+            size_pos = po_df[po_df["Item Size"] == selected_size].copy()
+            size_pos["Fulfillment %"] = round((size_pos["Recd Qty (Pcs)"] / size_pos["Ordered Qty (Pcs)"]) * 100, 1)
+
+            st.dataframe(size_pos[[
+                "PO No", "PO Date", "Foundry Name", "Ordered Qty (Pcs)",
+                "Recd Qty (Pcs)", "Pending Qty (Pcs)", "Fulfillment %",
+                "Status", "Completion Date"
+            ]], use_container_width=True)
