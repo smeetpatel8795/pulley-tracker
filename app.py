@@ -1,62 +1,52 @@
-import streamlit as st
 import pandas as pd
+import streamlit as st
 import os
-import json
-from datetime import datetime, date
 import io
+from datetime import date
+from reportlab.lib.pagesizes import letter, A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
-# PDF Generation imports (ReportLab)
-try:
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib import colors
-    REPORTLAB_AVAILABLE = True
-except ImportError:
-    REPORTLAB_AVAILABLE = False
+st.set_page_config(page_title="Pulley Manufacturing ERP", layout="wide")
 
-st.set_page_config(page_title="Pulley ERP - Weight, PO & Foundry Tracker", layout="wide")
-
-# File Paths for Local Database Persistence
-ITEM_MASTER_FILE = "item_master.csv"
-FOUNDRY_MASTER_FILE = "foundry_master.csv"
+# File Paths for CSV Persistence
+MASTER_ITEM_FILE = "master_items.csv"
+FOUNDRY_FILE = "master_foundries.csv"
 PO_FILE = "purchase_orders.csv"
 CHALLAN_FILE = "challan_entries.csv"
-PIG_IRON_FILE = "pig_iron_inward.csv"
+PIG_IRON_FILE = "pig_iron_entries.csv"
 
-# --- DATA INITIALIZATION ---
+# ----------------------------------------------------
+# DATA INITIALIZATION
+# ----------------------------------------------------
 def load_data():
-    if os.path.exists(ITEM_MASTER_FILE):
-        item_df = pd.read_csv(ITEM_MASTER_FILE)
+    if os.path.exists(MASTER_ITEM_FILE):
+        item_df = pd.read_csv(MASTER_ITEM_FILE)
     else:
         item_df = pd.DataFrame(columns=["Item Size", "Pattern Type", "Standard Weight per Pc (kg)"])
 
-    if os.path.exists(FOUNDRY_MASTER_FILE):
-        foundry_df = pd.read_csv(FOUNDRY_MASTER_FILE)
+    if os.path.exists(FOUNDRY_FILE):
+        foundry_df = pd.read_csv(FOUNDRY_FILE)
     else:
         foundry_df = pd.DataFrame(columns=[
-            "Foundry Name", "GST ID", "Address", "Contact Person", "Mobile", 
-            "Pig Iron Balance (kg)"
+            "Foundry Name", "GST ID", "Address", "Contact Person", "Mobile Number", "Opening Pig Iron Balance (kg)"
         ])
-
-    # Backward compatibility column check
-    if "Pig Iron Opening Balance (kg)" in foundry_df.columns and "Pig Iron Balance (kg)" not in foundry_df.columns:
-        foundry_df.rename(columns={"Pig Iron Opening Balance (kg)": "Pig Iron Balance (kg)"}, inplace=True)
 
     if os.path.exists(PO_FILE):
         po_df = pd.read_csv(PO_FILE)
     else:
         po_df = pd.DataFrame(columns=[
-            "PO No", "PO Date", "Foundry Name", "Item Size", "Ordered Qty (Pcs)", 
-            "Std Weight per Pc (kg)", "Expected Total Weight (kg)", "Rate per Kg (Rs)", 
-            "Total Amount (Rs)", "Recd Qty (Pcs)", "Pending Qty (Pcs)", "Status", "Completion Date"
+            "PO Date", "PO No", "Foundry Name", "Item Size", "Ordered Qty (Pcs)",
+            "Expected Total Weight (kg)", "Rate per kg (INR)", "GST Rate (%)", "Total Cost (INR)",
+            "Received Qty (Pcs)", "Pending Qty (Pcs)", "Status", "Completion Date"
         ])
 
     if os.path.exists(CHALLAN_FILE):
         challan_df = pd.read_csv(CHALLAN_FILE)
     else:
         challan_df = pd.DataFrame(columns=[
-            "Challan Date", "Challan No", "PO No", "Foundry Name", "Item Size", 
+            "Date", "Challan No", "PO No", "Foundry Name", "Item Size", 
             "Qty (Pcs)", "Actual Weight (kg)", "Expected Weight (kg)", 
             "Weight Variation (kg)", "Status"
         ])
@@ -65,732 +55,638 @@ def load_data():
         pig_iron_df = pd.read_csv(PIG_IRON_FILE)
     else:
         pig_iron_df = pd.DataFrame(columns=[
-            "Date", "Vendor Name", "Bill No", "Vehicle No", "Pig Iron Weight (kg)",
-            "Qty (Pcs/Bags)", "SGST Amount (Rs)", "CGST Amount (Rs)", "IGST Amount (Rs)",
-            "Round Off (Rs)", "Total Amount (Rs)", "Unloaded Foundry"
+            "Date", "Vendor Name", "Bill/Invoice No", "Vehicle No", 
+            "Pig Iron Weight (kg)", "Qty", "Unloaded Foundry", 
+            "SGST (%)", "CGST (%)", "IGST (%)", "Round Off", "Total Amount (INR)"
         ])
 
     return item_df, foundry_df, po_df, challan_df, pig_iron_df
 
 item_df, foundry_df, po_df, challan_df, pig_iron_df = load_data()
 
-# Session State Initializations
-if "po_basket" not in st.session_state:
-    st.session_state.po_basket = []
+if "current_po_items" not in st.session_state:
+    st.session_state.current_po_items = []
+if "current_challan_items" not in st.session_state:
+    st.session_state.current_challan_items = []
 
-if "challan_basket" not in st.session_state:
-    st.session_state.challan_basket = []
+# ----------------------------------------------------
+# HELPER FUNCTIONS
+# ----------------------------------------------------
+def get_foundry_pig_iron_balance(foundry_name):
+    f_row = foundry_df[foundry_df["Foundry Name"] == foundry_name]
+    opening = f_row["Opening Pig Iron Balance (kg)"].values[0] if not f_row.empty else 0.0
+    
+    inward = pig_iron_df[pig_iron_df["Unloaded Foundry"] == foundry_name]["Pig Iron Weight (kg)"].sum()
+    consumed = challan_df[challan_df["Foundry Name"] == foundry_name]["Actual Weight (kg)"].sum()
+    
+    return float(opening + inward - consumed)
 
-st.title("🏭 Pulley Foundry & Weight Loss Management ERP")
+def generate_po_pdf(po_number, po_items_df):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    story = []
+    styles = getSampleStyleSheet()
 
-menu = st.sidebar.radio("Navigation Menu", [
-    "📊 Executive Dashboard",
-    "📝 Masters (Item & Foundry)",
-    "🪵 Pig Iron Raw Material Inward",
+    header_style = ParagraphStyle('HeaderStyle', parent=styles['Heading1'], fontSize=18, leading=22, alignment=1)
+    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=10, leading=14, alignment=1)
+    
+    story.append(Paragraph("PURCHASE ORDER", header_style))
+    story.append(Spacer(1, 10))
+    
+    first_row = po_items_df.iloc[0]
+    info_text = f"<b>PO Date:</b> {first_row['PO Date']} &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <b>PO Number:</b> {po_number}<br/><b>To Foundry:</b> {first_row['Foundry Name']}"
+    story.append(Paragraph(info_text, styles['Normal']))
+    story.append(Spacer(1, 15))
+
+    table_data = [["Item Size", "Ordered Qty (Pcs)", "Expected Wt (kg)", "Rate/kg (₹)", "GST %", "Total Cost (₹)"]]
+    for _, row in po_items_df.iterrows():
+        table_data.append([
+            str(row["Item Size"]),
+            str(int(row["Ordered Qty (Pcs)"])),
+            f"{row['Expected Total Weight (kg)']:.2f}",
+            f"{row['Rate per kg (INR)']:.2f}",
+            f"{row['GST Rate (%)']:.1f}%",
+            f"{row['Total Cost (INR)']:.2f}"
+        ])
+
+    grand_total = po_items_df["Total Cost (INR)"].sum()
+    table_data.append(["Grand Total", "", "", "", "", f"₹ {grand_total:,.2f}"])
+
+    po_table = Table(table_data, colWidths=[150, 75, 80, 65, 50, 90])
+    po_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1E3A8A')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 9),
+        ('BOTTOMPADDING', (0,0), (-1,0), 6),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('FONTNAME', (0,-1), (-1,-1), 'Helvetica-Bold'),
+        ('BACKGROUND', (0,-1), (-1,-1), colors.HexColor('#F3F4F6')),
+    ]))
+    
+    story.append(po_table)
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+def generate_pig_iron_statement_pdf(foundry_name, start_d, end_d, ledger_df, opening_bal, total_in, total_out, final_bal):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
+    story = []
+    styles = getSampleStyleSheet()
+
+    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20, alignment=1)
+    sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=10, leading=14, alignment=1)
+
+    story.append(Paragraph(f"PIG IRON STATEMENT: {foundry_name.upper()}", title_style))
+    story.append(Paragraph(f"Period: {start_d} to {end_d}", sub_style))
+    story.append(Spacer(1, 15))
+
+    summary_data = [
+        ["Opening Balance (kg)", "Total Inward (kg)", "Total Consumed (kg)", "Closing Balance (kg)"],
+        [f"{opening_bal:.2f}", f"{total_in:.2f}", f"{total_out:.2f}", f"{final_bal:.2f}"]
+    ]
+    summary_table = Table(summary_data, colWidths=[120, 120, 120, 120])
+    summary_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1F2937')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('BACKGROUND', (0,1), (-1,1), colors.HexColor('#F9FAFB')),
+    ]))
+    story.append(summary_table)
+    story.append(Spacer(1, 20))
+
+    story.append(Paragraph("<b>Detailed Transaction Ledger:</b>", styles['Normal']))
+    story.append(Spacer(1, 8))
+
+    ledger_table_data = [["Date", "Type", "Reference / Bill", "Inward (+kg)", "Outward (-kg)", "Balance (kg)"]]
+    for _, row in ledger_df.iterrows():
+        ledger_table_data.append([
+            str(row["Date"]),
+            str(row["Type"]),
+            str(row["Reference"]),
+            f"{row['Inward (kg)']:.2f}" if row['Inward (kg)'] > 0 else "-",
+            f"{row['Outward (kg)']:.2f}" if row['Outward (kg)'] > 0 else "-",
+            f"{row['Balance (kg)']:.2f}"
+        ])
+
+    ledger_table = Table(ledger_table_data, colWidths=[70, 90, 110, 75, 75, 80])
+    ledger_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#374151')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 8),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+    ]))
+    story.append(ledger_table)
+
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
+
+# ----------------------------------------------------
+# APPLICATION INTERFACE & NAVIGATION
+# ----------------------------------------------------
+st.title("Pulley Manufacturing & Foundry Management System")
+
+st.sidebar.title("Navigation")
+menu = st.sidebar.radio("Go to Section:", [
+    "📊 Executive Dashboard & Reports",
+    "📦 Item Master Data",
+    "🏭 Foundry Master Data",
+    "🐷 Pig Iron Raw Material Inward",
+    "📝 Purchase Order Generator",
+    "🚚 Challan Entry (Incoming Castings)",
     "📄 Pig Iron Foundry Statement & PDF",
-    "📑 Create Purchase Order",
-    "🚚 Challan Entry against PO",
-    "📈 Foundry Pending Reports & Timeline",
-    "🔍 Item Size Specific Report"
+    "🔍 Item Size Reports & History"
 ])
 
-# -----------------------------------------------------------------------------
-# 1. EXECUTIVE DASHBOARD
-# -----------------------------------------------------------------------------
-if menu == "📊 Executive Dashboard":
-    st.header("Factory Overview Dashboard")
-    
-    c1, c2, c3, c4 = st.columns(4)
-    tot_pos = len(po_df["PO No"].unique()) if not po_df.empty else 0
-    tot_foundries = len(foundry_df) if not foundry_df.empty else 0
-    tot_items = len(item_df) if not item_df.empty else 0
-    tot_weight_loss = challan_df["Weight Variation (kg)"].sum() if not challan_df.empty else 0.0
+# ----------------------------------------------------
+# 1. EXECUTIVE DASHBOARD & REPORTS
+# ----------------------------------------------------
+if menu == "📊 Executive Dashboard & Reports":
+    st.header("Executive Operational Dashboard")
 
-    c1.metric("Total Active Foundries", tot_foundries)
-    c2.metric("Total Master Items", tot_items)
-    c3.metric("Total POs Generated", tot_pos)
-    c4.metric("Net Excess Weight Purchased (Loss)", f"{tot_weight_loss:+.2f} kg", 
-              delta_color="inverse" if tot_weight_loss > 0 else "normal")
-
-    st.markdown("---")
-    
-    # Pig Iron Balance Card Overview
-    st.subheader("🪵 Live Pig Iron Running Balance at Foundries")
-    if not foundry_df.empty:
-        st.dataframe(foundry_df[["Foundry Name", "Pig Iron Balance (kg)", "Contact Person", "Mobile"]], use_container_width=True)
-    else:
-        st.info("No foundry details configured.")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Total Item Masters", len(item_df))
+    with col2:
+        st.metric("Total Registered Foundries", len(foundry_df))
+    with col3:
+        active_pos = po_df[po_df["Status"] == "OPEN"]["PO No"].nunique() if not po_df.empty else 0
+        st.metric("Active Open POs", active_pos)
+    with col4:
+        total_var = challan_df["Weight Variation (kg)"].sum() if not challan_df.empty else 0.0
+        st.metric("Total Weight Variance Loss", f"{total_var:+.2f} kg", delta_color="inverse" if total_var > 0 else "normal")
 
     st.markdown("---")
+    tab_d1, tab_d2, tab_d3 = st.tabs(["🐷 Foundry Pig Iron Stocks", "📋 Pending Orders by Foundry", "📐 Size-Wise Pending Orders"])
 
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("Overweight Loss by Foundry")
-        if not challan_df.empty:
-            loss_by_foundry = challan_df.groupby("Foundry Name")["Weight Variation (kg)"].sum().reset_index()
-            st.dataframe(loss_by_foundry, use_container_width=True)
+    with tab_d1:
+        st.subheader("Foundry Pig Iron Stock Balances")
+        if foundry_df.empty:
+            st.info("No foundries registered yet.")
         else:
-            st.info("No challan data recorded yet.")
-
-    with col_b:
-        st.subheader("Pending Orders Summary")
-        if not po_df.empty:
-            pending_summary = po_df.groupby("Foundry Name")[["Ordered Qty (Pcs)", "Pending Qty (Pcs)"]].sum().reset_index()
-            st.dataframe(pending_summary, use_container_width=True)
-        else:
-            st.info("No PO data recorded yet.")
-
-# -----------------------------------------------------------------------------
-# 2. MASTERS MANAGEMENT
-# -----------------------------------------------------------------------------
-elif menu == "📝 Masters (Item & Foundry)":
-    st.header("Master Data Management")
-    m_tab1, m_tab2 = st.tabs(["📦 Item Master", "🏭 Foundry Master"])
-
-    # ITEM MASTER
-    with m_tab1:
-        st.subheader("Manage Item Sizes & Reference Weights")
-        upload_subtab, single_subtab = st.tabs(["📤 Bulk Upload (500+ Items)", "➕ Add/Edit Single Item"])
-
-        with upload_subtab:
-            st.info("Upload an Excel or CSV file containing columns: **Item Size**, **Pattern Type**, and **Standard Weight per Pc (kg)**")
-            up_file = st.file_uploader("Choose Excel or CSV File", type=["csv", "xlsx"])
-            if up_file:
-                try:
-                    df_up = pd.read_csv(up_file) if up_file.name.endswith('.csv') else pd.read_excel(up_file)
-                    req_cols = ["Item Size", "Pattern Type", "Standard Weight per Pc (kg)"]
-                    if all(c in df_up.columns for c in req_cols):
-                        st.write("Preview of Uploaded Data:")
-                        st.dataframe(df_up.head(10), use_container_width=True)
-                        if st.button("Save All Items to Item Master"):
-                            item_df = pd.concat([item_df, df_up[req_cols]], ignore_index=True)
-                            item_df.drop_duplicates(subset=["Item Size"], keep="last", inplace=True)
-                            item_df.to_csv(ITEM_MASTER_FILE, index=False)
-                            st.success(f"Successfully saved {len(df_up)} items!")
-                            st.rerun()
-                    else:
-                        st.error(f"Missing required columns. Please match: {req_cols}")
-                except Exception as e:
-                    st.error(f"Error reading file: {e}")
-
-        with single_subtab:
-            with st.form("single_item_form"):
-                item_size = st.text_input("Item Size (e.g., 6 inch C-Section 3 Groove)")
-                pattern_type = st.selectbox("Pattern Type", ["CI Shell", "Aluminum", "Wooden", "Match Plate", "Other"])
-                std_weight = st.number_input("Standard Weight per Piece (kg)", min_value=0.01, step=0.01)
-                submit_item = st.form_submit_button("Save Item Master")
-
-                if submit_item and item_size:
-                    if item_size in item_df["Item Size"].values:
-                        item_df.loc[item_df["Item Size"] == item_size, ["Pattern Type", "Standard Weight per Pc (kg)"]] = [pattern_type, std_weight]
-                    else:
-                        new_row = pd.DataFrame([{"Item Size": item_size, "Pattern Type": pattern_type, "Standard Weight per Pc (kg)": std_weight}])
-                        item_df = pd.concat([item_df, new_row], ignore_index=True)
-                    item_df.to_csv(ITEM_MASTER_FILE, index=False)
-                    st.success(f"Saved: {item_size}")
-                    st.rerun()
-
-        st.subheader("Current Item Master Inventory")
-        st.dataframe(item_df, use_container_width=True)
-
-    # FOUNDRY MASTER
-    with m_tab2:
-        st.subheader("Manage Foundry Details & Pig Iron Stock")
-        with st.form("foundry_form"):
-            fc1, fc2 = st.columns(2)
-            with fc1:
-                f_name = st.text_input("Foundry Name")
-                f_gst = st.text_input("GST ID / Number")
-                f_address = st.text_area("Foundry Address")
-            with fc2:
-                f_contact = st.text_input("Contact Person Name")
-                f_mobile = st.text_input("Mobile / Phone Number")
-                f_pig_iron = st.number_input("Pig Iron Initial Opening Balance (kg)", min_value=0.0, step=10.0)
-
-            submit_foundry = st.form_submit_button("Save Foundry Details")
-
-            if submit_foundry and f_name:
-                if f_name in foundry_df["Foundry Name"].values:
-                    foundry_df.loc[foundry_df["Foundry Name"] == f_name, ["GST ID", "Address", "Contact Person", "Mobile"]] = [f_gst, f_address, f_contact, f_mobile]
-                else:
-                    new_f = pd.DataFrame([{
-                        "Foundry Name": f_name, "GST ID": f_gst, "Address": f_address,
-                        "Contact Person": f_contact, "Mobile": f_mobile, "Pig Iron Balance (kg)": f_pig_iron
-                    }])
-                    foundry_df = pd.concat([foundry_df, new_f], ignore_index=True)
-                foundry_df.to_csv(FOUNDRY_MASTER_FILE, index=False)
-                st.success(f"Saved Foundry: {f_name}")
-                st.rerun()
-
-        st.subheader("Current Foundry Directory")
-        st.dataframe(foundry_df, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# 3. PIG IRON RAW MATERIAL INWARD SECTION
-# -----------------------------------------------------------------------------
-elif menu == "🪵 Pig Iron Raw Material Inward":
-    st.header("Pig Iron Purchase & Foundry Unloading Entry")
-
-    if foundry_df.empty:
-        st.warning("Please configure at least one Foundry in Foundry Master before entering Pig Iron receipts.")
-    else:
-        st.subheader("1. Record Vendor Delivery & Unloading Details")
-        
-        with st.form("pig_iron_entry_form"):
-            pi_col1, pi_col2, pi_col3 = st.columns(3)
-            with pi_col1:
-                inward_date = st.date_input("Inward Receipt Date", date.today())
-                vendor_name = st.text_input("Vendor Name (Supplied By)")
-                bill_no = st.text_input("Bill / Invoice Number")
-            with pi_col2:
-                vehicle_no = st.text_input("Vehicle Number")
-                pi_weight = st.number_input("Pig Iron Net Weight (kg)", min_value=0.0, step=1.0)
-                pi_qty = st.number_input("Quantity (Pcs/Bags)", min_value=0, step=1)
-            with pi_col3:
-                unload_foundry = st.selectbox("Unloaded at Foundry Destination", foundry_df["Foundry Name"].unique())
-                base_amount = st.number_input("Base Value (Rs)", min_value=0.0, step=100.0)
-                round_off = st.number_input("Round Off (R/O Rs)", value=0.0, step=0.1)
-
-            st.markdown("---")
-            st.write("**Tax Calculation:**")
-            tx1, tx2, tx3 = st.columns(3)
-            with tx1:
-                sgst_val = st.number_input("SGST Amount (Rs)", min_value=0.0, step=10.0)
-            with tx2:
-                cgst_val = st.number_input("CGST Amount (Rs)", min_value=0.0, step=10.0)
-            with tx3:
-                igst_val = st.number_input("IGST Amount (Rs)", min_value=0.0, step=10.0)
-
-            total_bill_amt = round(base_amount + sgst_val + cgst_val + igst_val + round_off, 2)
-            st.info(f"**Total Calculated Invoice Value:** Rs. {total_bill_amt:,.2f}")
-
-            submit_pi = st.form_submit_button("💾 Save Pig Iron Inward & Update Foundry Stock")
-
-            if submit_pi:
-                if not vendor_name or not bill_no or pi_weight <= 0:
-                    st.error("Please enter Vendor Name, Bill Number, and valid Pig Iron Weight.")
-                else:
-                    new_pi_entry = pd.DataFrame([{
-                        "Date": str(inward_date),
-                        "Vendor Name": vendor_name,
-                        "Bill No": bill_no,
-                        "Vehicle No": vehicle_no,
-                        "Pig Iron Weight (kg)": pi_weight,
-                        "Qty (Pcs/Bags)": pi_qty,
-                        "SGST Amount (Rs)": sgst_val,
-                        "CGST Amount (Rs)": cgst_val,
-                        "IGST Amount (Rs)": igst_val,
-                        "Round Off (Rs)": round_off,
-                        "Total Amount (Rs)": total_bill_amt,
-                        "Unloaded Foundry": unload_foundry
-                    }])
-
-                    pig_iron_df = pd.concat([pig_iron_df, new_pi_entry], ignore_index=True)
-                    pig_iron_df.to_csv(PIG_IRON_FILE, index=False)
-
-                    # AUTOMATICALLY ADD WEIGHT TO FOUNDRY PIG IRON BALANCE
-                    foundry_df.loc[foundry_df["Foundry Name"] == unload_foundry, "Pig Iron Balance (kg)"] += pi_weight
-                    foundry_df.to_csv(FOUNDRY_MASTER_FILE, index=False)
-
-                    st.success(f"Added {pi_weight} kg Pig Iron to '{unload_foundry}' balance!")
-                    st.rerun()
-
-        st.markdown("---")
-        st.subheader("2. Pig Iron Inward Transaction History")
-        if pig_iron_df.empty:
-            st.info("No Pig Iron inward entries recorded yet.")
-        else:
-            st.dataframe(pig_iron_df, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# 4. PIG IRON FOUNDRY STATEMENT & PERIODIC PDF REPORT
-# -----------------------------------------------------------------------------
-elif menu == "📄 Pig Iron Foundry Statement & PDF":
-    st.header("Foundry Pig Iron Statement & Running Balance Ledger")
-
-    if foundry_df.empty:
-        st.warning("Please configure Foundry Master first.")
-    else:
-        st.subheader("1. Report Filters")
-        rf1, rf2, rf3 = st.columns([3, 2, 2])
-        with rf1:
-            rep_foundry = st.selectbox("Select Foundry", foundry_df["Foundry Name"].unique())
-        with rf2:
-            period_type = st.radio("Select Period", ["All Time (Start to Date)", "Custom Date Range"], horizontal=True)
-        with rf3:
-            if period_type == "Custom Date Range":
-                d_start = st.date_input("Start Date", date(2025, 1, 1))
-                d_end = st.date_input("End Date", date.today())
-            else:
-                d_start = None
-                d_end = None
-
-        # Gather Inwards for Foundry
-        f_inwards = pig_iron_df[pig_iron_df["Unloaded Foundry"] == rep_foundry].copy() if not pig_iron_df.empty else pd.DataFrame()
-        if not f_inwards.empty:
-            f_inwards["Type"] = "PIG IRON INWARD (+)"
-            f_inwards["Ref/Bill No"] = f_inwards["Bill No"]
-            f_inwards["Inward (kg)"] = f_inwards["Pig Iron Weight (kg)"]
-            f_inwards["Outward (kg)"] = 0.0
-            f_inwards["Details"] = "Vendor: " + f_inwards["Vendor Name"].fillna("") + " | Veh: " + f_inwards["Vehicle No"].fillna("")
-            f_inwards = f_inwards[["Date", "Type", "Ref/Bill No", "Details", "Inward (kg)", "Outward (kg)"]]
-
-        # Gather Outwards (Castings Received) for Foundry
-        f_outwards = challan_df[challan_df["Foundry Name"] == rep_foundry].copy() if not challan_df.empty else pd.DataFrame()
-        if not f_outwards.empty:
-            f_outwards["Date"] = f_outwards["Challan Date"]
-            f_outwards["Type"] = "CASTING CONSUMPTION (-)"
-            f_outwards["Ref/Bill No"] = f_outwards["Challan No"]
-            f_outwards["Inward (kg)"] = 0.0
-            f_outwards["Outward (kg)"] = f_outwards["Actual Weight (kg)"]
-            f_outwards["Details"] = "Item: " + f_outwards["Item Size"].fillna("") + " | Pcs: " + f_outwards["Qty (Pcs)"].astype(str)
-            f_outwards = f_outwards[["Date", "Type", "Ref/Bill No", "Details", "Inward (kg)", "Outward (kg)"]]
-
-        # Merge Transactions
-        combined_ledger = pd.concat([f_inwards, f_outwards], ignore_index=True)
-
-        if not combined_ledger.empty:
-            combined_ledger["Date_dt"] = pd.to_datetime(combined_ledger["Date"])
-            combined_ledger.sort_values(by="Date_dt", ascending=True, inplace=True)
-
-            # Date Range Filter Applied
-            if period_type == "Custom Date Range" and d_start and d_end:
-                combined_ledger = combined_ledger[(combined_ledger["Date_dt"].dt.date >= d_start) & (combined_ledger["Date_dt"].dt.date <= d_end)]
-
-            # Calculate Running Balance
-            running_bal = 0.0
-            balances = []
-            for _, r in combined_ledger.iterrows():
-                running_bal += r["Inward (kg)"] - r["Outward (kg)"]
-                balances.append(round(running_bal, 2))
-            combined_ledger["Running Balance (kg)"] = balances
-
-        st.markdown("---")
-        st.subheader(f"2. Pig Iron Ledger Statement: {rep_foundry}")
-
-        tot_inward_kg = combined_ledger["Inward (kg)"].sum() if not combined_ledger.empty else 0.0
-        tot_outward_kg = combined_ledger["Outward (kg)"].sum() if not combined_ledger.empty else 0.0
-        current_bal_kg = foundry_df.loc[foundry_df["Foundry Name"] == rep_foundry, "Pig Iron Balance (kg)"].values[0]
-
-        k1, k2, k3 = st.columns(3)
-        k1.metric("Total Pig Iron Received (+)", f"{tot_inward_kg:,.2f} kg")
-        k2.metric("Total Casting Consumption (-)", f"{tot_outward_kg:,.2f} kg")
-        k3.metric("Current Available Stock Balance", f"{current_bal_kg:,.2f} kg")
-
-        if combined_ledger.empty:
-            st.info(f"No transaction records found for {rep_foundry} within the selected timeframe.")
-        else:
-            display_ledger = combined_ledger.drop(columns=["Date_dt"])
-            st.dataframe(display_ledger, use_container_width=True)
-
-            # Generate PDF Download Button
-            if REPORTLAB_AVAILABLE:
-                st.markdown("---")
-                if st.button("📄 Export Pig Iron Statement to PDF"):
-                    pdf_buf = io.BytesIO()
-                    doc = SimpleDocTemplate(pdf_buf, pagesize=A4, rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
-                    styles = getSampleStyleSheet()
-                    story = []
-
-                    story.append(Paragraph(f"<b>PIG IRON LEDGER STATEMENT</b>", styles['Title']))
-                    story.append(Paragraph(f"<b>Foundry Name:</b> {rep_foundry}", styles['Heading2']))
-                    date_str = f"{d_start} to {d_end}" if period_type == "Custom Date Range" else "All Time (Start to Date)"
-                    story.append(Paragraph(f"<b>Period:</b> {date_str} | <b>Generated Date:</b> {date.today()}", styles['Normal']))
-                    story.append(Spacer(1, 10))
-
-                    summary_table = [
-                        ["Total Inward (+)", "Total Consumption (-)", "Current Balance Stock"],
-                        [f"{tot_inward_kg:,.2f} kg", f"{tot_outward_kg:,.2f} kg", f"{current_bal_kg:,.2f} kg"]
-                    ]
-                    st_table = Table(summary_table, colWidths=[160, 160, 160])
-                    st_table.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#333333")),
-                        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
-                    ]))
-                    story.append(st_table)
-                    story.append(Spacer(1, 15))
-
-                    table_data = [["Date", "Type", "Ref No", "Details", "In (+)", "Out (-)", "Balance"]]
-                    for _, r in display_ledger.iterrows():
-                        table_data.append([
-                            str(r["Date"]), str(r["Type"]), str(r["Ref/Bill No"]), 
-                            str(r["Details"])[:28], f"{r['Inward (kg)']:.1f}", 
-                            f"{r['Outward (kg)']:.1f}", f"{r['Running Balance (kg)']:.1f}"
-                        ])
-
-                    t_led = Table(table_data, colWidths=[65, 85, 65, 120, 55, 55, 65])
-                    t_led.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1E88E5")),
-                        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-                        ('FONTSIZE', (0,0), (-1,-1), 8),
-                        ('BOTTOMPADDING', (0,0), (-1,0), 4),
-                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
-                    ]))
-                    story.append(t_led)
-
-                    doc.build(story)
-                    pdf_bytes = pdf_buf.getvalue()
-
-                    st.download_button(
-                        label="💾 Download PDF Statement",
-                        data=pdf_bytes,
-                        file_name=f"PigIron_Statement_{rep_foundry.replace(' ', '_')}.pdf",
-                        mime="application/pdf"
-                    )
-
-# -----------------------------------------------------------------------------
-# 5. CREATE PURCHASE ORDER & PDF GENERATION
-# -----------------------------------------------------------------------------
-elif menu == "📑 Create Purchase Order":
-    st.header("Generate Purchase Order (PO)")
-
-    if foundry_df.empty or item_df.empty:
-        st.warning("Please configure both Foundry Master and Item Master before generating a PO.")
-    else:
-        st.subheader("1. PO Header")
-        p_col1, p_col2, p_col3 = st.columns(3)
-        with p_col1:
-            po_number = st.text_input("Purchase Order No.", f"PO-{datetime.now().strftime('%Y%m%d%H%M')}")
-        with p_col2:
-            po_date = st.date_input("PO Date", date.today())
-        with p_col3:
-            selected_foundry = st.selectbox("Select Foundry", foundry_df["Foundry Name"].unique())
-
-        st.markdown("---")
-        st.subheader("2. Add Line Items to Purchase Order")
-
-        i_col1, i_col2, i_col3, i_col4 = st.columns([3, 2, 2, 2])
-        with i_col1:
-            selected_item = st.selectbox("Select Item Size", item_df["Item Size"].unique())
-        with i_col2:
-            ordered_pcs = st.number_input("Order Qty (Pcs)", min_value=1, step=1)
-        with i_col3:
-            rate_per_kg = st.number_input("Rate per KG (Rs)", min_value=0.01, step=0.50)
-        with i_col4:
-            st.write(" ")
-            st.write(" ")
-            add_po_item = st.button("➕ Add Item to PO")
-
-        std_w_pc = item_df.loc[item_df["Item Size"] == selected_item, "Standard Weight per Pc (kg)"].values[0]
-        expected_total_kg = round(ordered_pcs * std_w_pc, 2)
-        item_total_amount = round(expected_total_kg * rate_per_kg, 2)
-
-        if add_po_item:
-            st.session_state.po_basket.append({
-                "PO No": po_number,
-                "PO Date": str(po_date),
-                "Foundry Name": selected_foundry,
-                "Item Size": selected_item,
-                "Ordered Qty (Pcs)": ordered_pcs,
-                "Std Weight per Pc (kg)": std_w_pc,
-                "Expected Total Weight (kg)": expected_total_kg,
-                "Rate per Kg (Rs)": rate_per_kg,
-                "Total Amount (Rs)": item_total_amount,
-                "Recd Qty (Pcs)": 0,
-                "Pending Qty (Pcs)": ordered_pcs,
-                "Status": "OPEN",
-                "Completion Date": "N/A"
-            })
-            st.success(f"Added {selected_item} to draft PO!")
-
-        if st.session_state.po_basket:
-            st.subheader("Items in Current Purchase Order")
-            basket_df = pd.DataFrame(st.session_state.po_basket)
-            st.dataframe(basket_df[["Item Size", "Ordered Qty (Pcs)", "Std Weight per Pc (kg)", 
-                                    "Expected Total Weight (kg)", "Rate per Kg (Rs)", "Total Amount (Rs)"]], use_container_width=True)
-
-            tot_po_weight = basket_df["Expected Total Weight (kg)"].sum()
-            tot_po_cost = basket_df["Total Amount (Rs)"].sum()
-
-            m1, m2 = st.columns(2)
-            m1.metric("Total Estimated Weight", f"{tot_po_weight:.2f} kg")
-            m2.metric("Total Estimated Order Value", f"Rs. {tot_po_cost:,.2f}")
-
-            btn_col1, btn_col2 = st.columns([2, 10])
-            with btn_col1:
-                save_po = st.button("💾 Save & Issue Purchase Order", type="primary")
-            with btn_col2:
-                clear_po = st.button("❌ Clear Draft")
-
-            if clear_po:
-                st.session_state.po_basket = []
-                st.rerun()
-
-            if save_po:
-                po_df = pd.concat([po_df, pd.DataFrame(st.session_state.po_basket)], ignore_index=True)
-                po_df.to_csv(PO_FILE, index=False)
-                st.success(f"Purchase Order {po_number} created successfully!")
-                
-                if REPORTLAB_AVAILABLE:
-                    pdf_buffer = io.BytesIO()
-                    doc = SimpleDocTemplate(pdf_buffer, pagesize=A4, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-                    styles = getSampleStyleSheet()
-                    story = []
-
-                    story.append(Paragraph("<b>PURCHASE ORDER</b>", styles['Title']))
-                    story.append(Spacer(1, 10))
-                    story.append(Paragraph(f"<b>PO Number:</b> {po_number} | <b>Date:</b> {po_date}", styles['Normal']))
-                    story.append(Paragraph(f"<b>Foundry Name:</b> {selected_foundry}", styles['Normal']))
-                    story.append(Spacer(1, 15))
-
-                    table_data = [["Item Size", "Qty (Pcs)", "Std Wt/Pc", "Exp Total Wt (kg)", "Rate/Kg (Rs)", "Total (Rs)"]]
-                    for _, r in basket_df.iterrows():
-                        table_data.append([r["Item Size"], str(r["Ordered Qty (Pcs)"]), str(r["Std Weight per Pc (kg)"]), 
-                                          str(r["Expected Total Weight (kg)"]), str(r["Rate per Kg (Rs)"]), f"{r['Total Amount (Rs)']:,.2f}"])
-
-                    t = Table(table_data)
-                    t.setStyle(TableStyle([
-                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor("#1E88E5")),
-                        ('TEXTCOLOR', (0,0), (-1,0), colors.white),
-                        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
-                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-                        ('BOTTOMPADDING', (0,0), (-1,0), 6),
-                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey)
-                    ]))
-                    story.append(t)
-                    story.append(Spacer(1, 15))
-                    story.append(Paragraph(f"<b>Total Order Amount: Rs. {tot_po_cost:,.2f}</b>", styles['Heading2']))
-
-                    doc.build(story)
-                    pdf_data = pdf_buffer.getvalue()
-
-                    st.download_button(
-                        label="📄 Download Purchase Order PDF",
-                        data=pdf_data,
-                        file_name=f"PO_{po_number}.pdf",
-                        mime="application/pdf"
-                    )
-
-                st.session_state.po_basket = []
-
-# -----------------------------------------------------------------------------
-# 6. CHALLAN ENTRY AGAINST PO (AUTO WEIGHT VARIATION & PIG IRON DEDUCTION)
-# -----------------------------------------------------------------------------
-elif menu == "🚚 Challan Entry against PO":
-    st.header("Challan Entry & Material Receipt")
-
-    if po_df.empty:
-        st.info("No active Purchase Orders available. Please generate a PO first.")
-    else:
-        open_pos = po_df[po_df["Status"] == "OPEN"]["PO No"].unique()
-        if len(open_pos) == 0:
-            st.success("All Purchase Orders are fully fulfilled!")
-        else:
-            st.subheader("1. Select PO & Enter Challan Header")
-            ch_col1, ch_col2, ch_col3 = st.columns(3)
-            with ch_col1:
-                selected_po = st.selectbox("Select Purchase Order No.", open_pos)
-            with ch_col2:
-                ch_number = st.text_input("Challan No.")
-            with ch_col3:
-                ch_date = st.date_input("Challan Receipt Date", date.today())
-
-            po_items = po_df[(po_df["PO No"] == selected_po) & (po_df["Pending Qty (Pcs)"] > 0)]
-            foundry_for_po = po_items["Foundry Name"].values[0] if not po_items.empty else ""
-
-            # Show live Pig Iron balance for selected foundry
-            curr_pi_bal = foundry_df.loc[foundry_df["Foundry Name"] == foundry_for_po, "Pig Iron Balance (kg)"].values[0] if foundry_for_po in foundry_df["Foundry Name"].values else 0.0
-
-            st.write(f"**Foundry:** {foundry_for_po} | **Current Available Pig Iron Balance:** `{curr_pi_bal:.2f} kg`")
-            st.markdown("---")
-
-            st.subheader("2. Receive Items against PO")
-            rc1, rc2, rc3, rc4 = st.columns([3, 2, 2, 2])
-
-            with rc1:
-                recv_item = st.selectbox("Select Item in PO", po_items["Item Size"].unique())
-            with rc2:
-                item_po_data = po_items[po_items["Item Size"] == recv_item].iloc[0]
-                max_pending = item_po_data["Pending Qty (Pcs)"]
-                recv_pcs = st.number_input(f"Received Qty (Pcs) [Max Pending: {max_pending}]", min_value=1, max_value=int(max_pending), step=1)
-            with rc3:
-                actual_weight_recd = st.number_input("Actual Received Weight (kg)", min_value=0.01, step=0.1)
-            with rc4:
-                st.write(" ")
-                st.write(" ")
-                add_challan_line = st.button("➕ Add Item to Challan")
-
-            std_w = item_po_data["Std Weight per Pc (kg)"]
-            exp_wt = round(recv_pcs * std_w, 2)
-            wt_var = round(actual_weight_recd - exp_wt, 2)
-            status_tag = "OVERWEIGHT (Loss)" if wt_var > 0 else ("UNDERWEIGHT (Gain)" if wt_var < 0 else "EXACT MATCH")
-
-            if add_challan_line:
-                st.session_state.challan_basket.append({
-                    "Challan Date": str(ch_date),
-                    "Challan No": ch_number,
-                    "PO No": selected_po,
-                    "Foundry Name": foundry_for_po,
-                    "Item Size": recv_item,
-                    "Qty (Pcs)": recv_pcs,
-                    "Actual Weight (kg)": actual_weight_recd,
-                    "Expected Weight (kg)": exp_wt,
-                    "Weight Variation (kg)": wt_var,
-                    "Status": status_tag
+            pig_summary = []
+            for _, f_row in foundry_df.iterrows():
+                fname = f_row["Foundry Name"]
+                bal = get_foundry_pig_iron_balance(fname)
+                pig_summary.append({
+                    "Foundry Name": fname,
+                    "Opening Balance (kg)": f_row["Opening Pig Iron Balance (kg)"],
+                    "Inward Received (kg)": pig_iron_df[pig_iron_df["Unloaded Foundry"] == fname]["Pig Iron Weight (kg)"].sum(),
+                    "Castings Consumed (kg)": challan_df[challan_df["Foundry Name"] == fname]["Actual Weight (kg)"].sum(),
+                    "Current Pig Iron Balance (kg)": bal
                 })
-                st.success(f"Added {recv_item} ({recv_pcs} pcs) to Challan!")
+            st.dataframe(pd.DataFrame(pig_summary), use_container_width=True)
 
-            if st.session_state.challan_basket:
-                st.subheader("Items in Current Challan Entry")
-                c_basket_df = pd.DataFrame(st.session_state.challan_basket)
-                st.dataframe(c_basket_df, use_container_width=True)
+    with tab_d2:
+        st.subheader("Pending Orders Summary by Foundry")
+        if po_df.empty:
+            st.info("No Purchase Orders created yet.")
+        else:
+            f_group = po_df.groupby("Foundry Name").agg({
+                "Ordered Qty (Pcs)": "sum",
+                "Received Qty (Pcs)": "sum",
+                "Pending Qty (Pcs)": "sum"
+            }).reset_index()
+            st.dataframe(f_group, use_container_width=True)
 
-                c_tot_act = c_basket_df["Actual Weight (kg)"].sum()
-                c_tot_exp = c_basket_df["Expected Weight (kg)"].sum()
-                c_tot_var = c_basket_df["Weight Variation (kg)"].sum()
+    with tab_d3:
+        st.subheader("Pending Orders Summary by Item Size")
+        if po_df.empty:
+            st.info("No Purchase Orders created yet.")
+        else:
+            s_group = po_df.groupby("Item Size").agg({
+                "Ordered Qty (Pcs)": "sum",
+                "Received Qty (Pcs)": "sum",
+                "Pending Qty (Pcs)": "sum"
+            }).reset_index()
+            st.dataframe(s_group, use_container_width=True)
 
-                x1, x2, x3 = st.columns(3)
-                x1.metric("Actual Weight Received", f"{c_tot_act:.2f} kg")
-                x2.metric("Expected Standard Weight", f"{c_tot_exp:.2f} kg")
-                x3.metric("Weight Loss / Gain Variance", f"{c_tot_var:+.2f} kg", 
-                          delta_color="inverse" if c_tot_var > 0 else "normal")
+# ----------------------------------------------------
+# 2. ITEM MASTER DATA
+# ----------------------------------------------------
+elif menu == "📦 Item Master Data":
+    st.header("Item Master Data Management")
+    tab1, tab2 = st.tabs(["📤 Bulk Upload (Excel/CSV)", "➕ Add Single Item"])
 
-                if st.button("💾 Submit Challan, Update PO & Deduct Pig Iron Balance", type="primary"):
-                    if not ch_number:
-                        st.error("Please provide a Challan Number.")
+    with tab1:
+        st.subheader("Bulk Import Pulley Master Data")
+        uploaded_file = st.file_uploader("Upload CSV or XLSX file", type=["csv", "xlsx"])
+        if uploaded_file:
+            try:
+                if uploaded_file.name.endswith(".csv"):
+                    new_items = pd.read_csv(uploaded_file)
+                else:
+                    new_items = pd.read_excel(uploaded_file)
+                
+                req_cols = ["Item Size", "Pattern Type", "Standard Weight per Pc (kg)"]
+                if all(c in new_items.columns for c in req_cols):
+                    st.dataframe(new_items.head(), use_container_width=True)
+                    if st.button("Save Uploaded Items"):
+                        item_df = pd.concat([item_df, new_items[req_cols]], ignore_index=True)
+                        item_df = item_df.drop_duplicates(subset=["Item Size"], keep="last")
+                        item_df.to_csv(MASTER_ITEM_FILE, index=False)
+                        st.success("Item Master successfully updated!")
+                        st.experimental_rerun()
+                else:
+                    st.error(f"File must contain columns: {req_cols}")
+            except Exception as e:
+                st.error(f"Error loading file: {e}")
+
+    with tab2:
+        st.subheader("Add / Update Item")
+        with st.form("single_item_form"):
+            i_size = st.text_input("Item Size (e.g. 10 inch C-Section 3 Groove)")
+            i_pattern = st.text_input("Pattern Type / Mould Ref")
+            i_weight = st.number_input("Standard Weight per Piece (kg)", min_value=0.01, step=0.01)
+            submit_item = st.form_submit_button("Save Item Master")
+
+            if submit_item:
+                if i_size.strip() != "":
+                    if i_size in item_df["Item Size"].values:
+                        item_df.loc[item_df["Item Size"] == i_size, ["Pattern Type", "Standard Weight per Pc (kg)"]] = [i_pattern, i_weight]
                     else:
-                        # Append to Challan File
-                        challan_df = pd.concat([challan_df, pd.DataFrame(st.session_state.challan_basket)], ignore_index=True)
-                        challan_df.to_csv(CHALLAN_FILE, index=False)
+                        new_row = pd.DataFrame([{"Item Size": i_size, "Pattern Type": i_pattern, "Standard Weight per Pc (kg)": i_weight}])
+                        item_df = pd.concat([item_df, new_row], ignore_index=True)
+                    item_df.to_csv(MASTER_ITEM_FILE, index=False)
+                    st.success(f"Saved {i_size} successfully!")
+                    st.experimental_rerun()
 
-                        # Auto-Deduct PO Balances AND Deduct Actual Casting Weight from Pig Iron Balance
-                        total_act_weight_delivered = 0.0
+    st.markdown("---")
+    st.subheader("Current Master Inventory List")
+    st.dataframe(item_df, use_container_width=True)
 
-                        for entry in st.session_state.challan_basket:
-                            po_mask = (po_df["PO No"] == entry["PO No"]) & (po_df["Item Size"] == entry["Item Size"])
-                            po_df.loc[po_mask, "Recd Qty (Pcs)"] += entry["Qty (Pcs)"]
-                            po_df.loc[po_mask, "Pending Qty (Pcs)"] -= entry["Qty (Pcs)"]
+# ----------------------------------------------------
+# 3. FOUNDRY MASTER DATA
+# ----------------------------------------------------
+elif menu == "🏭 Foundry Master Data":
+    st.header("Foundry Master Register")
+    with st.form("foundry_form"):
+        f_name = st.text_input("Foundry Name")
+        f_gst = st.text_input("GST ID")
+        f_address = st.text_area("Address")
+        col1, col2 = st.columns(2)
+        with col1:
+            f_contact = st.text_input("Contact Person")
+        with col2:
+            f_mobile = st.text_input("Mobile Number")
+        f_opening_pig = st.number_input("Opening Pig Iron Balance (kg)", min_value=0.0, step=1.0)
 
-                            total_act_weight_delivered += entry["Actual Weight (kg)"]
+        submit_f = st.form_submit_button("Save Foundry Master")
+        if submit_f:
+            if f_name.strip() != "":
+                if f_name in foundry_df["Foundry Name"].values:
+                    foundry_df.loc[foundry_df["Foundry Name"] == f_name, :] = [f_name, f_gst, f_address, f_contact, f_mobile, f_opening_pig]
+                else:
+                    new_f = pd.DataFrame([{"Foundry Name": f_name, "GST ID": f_gst, "Address": f_address, "Contact Person": f_contact, "Mobile Number": f_mobile, "Opening Pig Iron Balance (kg)": f_opening_pig}])
+                    foundry_df = pd.concat([foundry_df, new_f], ignore_index=True)
+                foundry_df.to_csv(FOUNDRY_FILE, index=False)
+                st.success(f"Foundry {f_name} saved successfully!")
+                st.experimental_rerun()
 
-                            if po_df.loc[po_mask, "Pending Qty (Pcs)"].values[0] <= 0:
-                                po_df.loc[po_mask, "Completion Date"] = str(ch_date)
+    st.markdown("---")
+    st.subheader("Registered Foundries")
+    st.dataframe(foundry_df, use_container_width=True)
 
-                        # AUTOMATICALLY DEDUCT ACTUAL WEIGHT FROM FOUNDRY PIG IRON STOCK
-                        foundry_df.loc[foundry_df["Foundry Name"] == foundry_for_po, "Pig Iron Balance (kg)"] -= total_act_weight_delivered
-                        foundry_df.to_csv(FOUNDRY_MASTER_FILE, index=False)
-
-                        po_sub = po_df[po_df["PO No"] == selected_po]
-                        if (po_sub["Pending Qty (Pcs)"] <= 0).all():
-                            po_df.loc[po_df["PO No"] == selected_po, "Status"] = "CLOSED"
-
-                        po_df.to_csv(PO_FILE, index=False)
-                        st.session_state.challan_basket = []
-                        st.success(f"Challan submitted! Deducted {total_act_weight_delivered:.2f} kg Pig Iron from {foundry_for_po}'s balance.")
-                        st.rerun()
-
-# -----------------------------------------------------------------------------
-# 7. FOUNDRY REPORTS, PENDING ORDERS & TIMELINE TRACKING
-# -----------------------------------------------------------------------------
-elif menu == "📈 Foundry Pending Reports & Timeline":
-    st.header("Foundry Ledger, Pending Orders & Timeline Analytics")
-
-    r_tab1, r_tab2, r_tab3, r_tab4 = st.tabs(["📦 Pending PO Status", "⏱️ Order Timeline & Fulfillment", "⚖️ Weight Variation Audit", "🪵 Pig Iron Ledger"])
-
-    # TAB 1: PENDING POs
-    with r_tab1:
-        st.subheader("Live Pending Quantities per Foundry")
-        if po_df.empty:
-            st.info("No PO data available.")
-        else:
-            f_filter = st.selectbox("Filter by Foundry", ["ALL"] + list(foundry_df["Foundry Name"].unique()))
-            view_po = po_df if f_filter == "ALL" else po_df[po_df["Foundry Name"] == f_filter]
-
-            st.dataframe(view_po[[
-                "PO No", "PO Date", "Foundry Name", "Item Size", 
-                "Ordered Qty (Pcs)", "Recd Qty (Pcs)", "Pending Qty (Pcs)", "Status"
-            ]], use_container_width=True)
-
-    # TAB 2: TIMELINE & SPEED
-    with r_tab2:
-        st.subheader("Foundry Execution & Completion Timeline")
-        if po_df.empty:
-            st.info("No order timeline data available.")
-        else:
-            po_timeline = po_df.copy()
-            po_timeline["PO Date"] = pd.to_datetime(po_timeline["PO Date"])
-            po_timeline["Fulfillment %"] = round((po_timeline["Recd Qty (Pcs)"] / po_timeline["Ordered Qty (Pcs)"]) * 100, 1)
-            
-            st.dataframe(po_timeline[[
-                "PO No", "Foundry Name", "PO Date", "Item Size", 
-                "Ordered Qty (Pcs)", "Recd Qty (Pcs)", "Fulfillment %", "Status", "Completion Date"
-            ]], use_container_width=True)
-
-    # TAB 3: WEIGHT LOSS AUDIT
-    with r_tab3:
-        st.subheader("Mould Weight Variance Audit Report")
-        if challan_df.empty:
-            st.info("No challan entries available.")
-        else:
-            st.dataframe(challan_df, use_container_width=True)
-            total_excess = challan_df["Weight Variation (kg)"].sum()
-            st.warning(f"⚠️ Total Financial Extra Material Purchased across all Challans: **{total_excess:+.2f} kg**")
-
-    # TAB 4: PIG IRON LEDGER
-    with r_tab4:
-        st.subheader("Pig Iron Inward Ledger")
-        if pig_iron_df.empty:
-            st.info("No pig iron entries recorded.")
-        else:
-            st.dataframe(pig_iron_df, use_container_width=True)
-
-# -----------------------------------------------------------------------------
-# 8. ITEM SIZE SPECIFIC REPORT & TIMELINE
-# -----------------------------------------------------------------------------
-elif menu == "🔍 Item Size Specific Report":
-    st.header("Item Size Inspection & Casting History")
-
-    if item_df.empty:
-        st.warning("No items found in Item Master.")
+# ----------------------------------------------------
+# 4. PIG IRON RAW MATERIAL INWARD
+# ----------------------------------------------------
+elif menu == "🐷 Pig Iron Raw Material Inward":
+    st.header("Pig Iron Vendor Delivery Inward")
+    
+    if foundry_df.empty:
+        st.warning("Please register at least one Foundry in 'Foundry Master Data' first.")
     else:
-        selected_size = st.selectbox("Select Item Size to Inspect", item_df["Item Size"].unique())
+        with st.form("pig_iron_form"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                p_date = st.date_input("Inward Date")
+                p_vendor = st.text_input("Vendor Name")
+            with c2:
+                p_bill = st.text_input("Bill / Invoice No.")
+                p_vehicle = st.text_input("Vehicle No.")
+            with c3:
+                p_foundry = st.selectbox("Unloaded at Foundry", foundry_df["Foundry Name"].unique())
+                p_weight = st.number_input("Pig Iron Weight (kg)", min_value=0.01, step=0.1)
 
-        std_weight_info = item_df.loc[item_df["Item Size"] == selected_size, "Standard Weight per Pc (kg)"].values[0]
-        pattern_info = item_df.loc[item_df["Item Size"] == selected_size, "Pattern Type"].values[0]
+            st.subheader("Taxation & Cost Details")
+            tc1, tc2, tc3, tc4 = st.columns(4)
+            with tc1:
+                p_qty = st.number_input("Qty (Bags/Bundles)", min_value=1, step=1)
+                p_sgst = st.number_input("SGST (%)", min_value=0.0, step=0.5)
+            with tc2:
+                p_cgst = st.number_input("CGST (%)", min_value=0.0, step=0.5)
+            with tc3:
+                p_igst = st.number_input("IGST (%)", min_value=0.0, step=0.5)
+            with tc4:
+                p_ro = st.number_input("Round Off (R/O)", step=0.01)
+                p_total = st.number_input("Total Amount (INR)", min_value=0.0, step=1.0)
 
-        m1, m2 = st.columns(2)
-        m1.info(f"**Pattern Type:** {pattern_info}")
-        m2.info(f"**Standard Weight per Pc:** {std_weight_info} kg")
+            submit_pig = st.form_submit_button("Save Pig Iron Entry")
+            if submit_pig:
+                new_pig = {
+                    "Date": str(p_date), "Vendor Name": p_vendor, "Bill/Invoice No": p_bill,
+                    "Vehicle No": p_vehicle, "Pig Iron Weight (kg)": p_weight, "Qty": p_qty,
+                    "Unloaded Foundry": p_foundry, "SGST (%)": p_sgst, "CGST (%)": p_cgst,
+                    "IGST (%)": p_igst, "Round Off": p_ro, "Total Amount (INR)": p_total
+                }
+                pig_iron_df = pd.concat([pig_iron_df, pd.DataFrame([new_pig])], ignore_index=True)
+                pig_iron_df.to_csv(PIG_IRON_FILE, index=False)
+                st.success(f"Pig Iron entry recorded! Added {p_weight} kg to {p_foundry}'s stock balance.")
+                st.experimental_rerun()
 
         st.markdown("---")
-        st.subheader(f"1. Casting Receipt History for '{selected_size}'")
+        st.subheader("Recent Pig Iron Inward Entries")
+        st.dataframe(pig_iron_df, use_container_width=True)
 
-        if challan_df.empty or selected_size not in challan_df["Item Size"].values:
-            st.info(f"No castings received yet for item size: {selected_size}")
-        else:
-            size_challans = challan_df[challan_df["Item Size"] == selected_size].copy()
-
-            tot_recd_pcs = size_challans["Qty (Pcs)"].sum()
-            tot_recd_wt = size_challans["Actual Weight (kg)"].sum()
-            tot_wt_var = size_challans["Weight Variation (kg)"].sum()
-
-            s_col1, s_col2, s_col3 = st.columns(3)
-            s_col1.metric("Total Received Quantity", f"{tot_recd_pcs} Pcs")
-            s_col2.metric("Total Actual Weight Received", f"{tot_recd_wt:.2f} kg")
-            s_col3.metric("Net Weight Variance", f"{tot_wt_var:+.2f} kg", delta_color="inverse" if tot_wt_var > 0 else "normal")
-
-            st.dataframe(size_challans[[
-                "Challan Date", "Challan No", "Foundry Name", "PO No",
-                "Qty (Pcs)", "Actual Weight (kg)", "Expected Weight (kg)", 
-                "Weight Variation (kg)", "Status"
-            ]], use_container_width=True)
+# ----------------------------------------------------
+# 5. PURCHASE ORDER GENERATOR
+# ----------------------------------------------------
+elif menu == "📝 Purchase Order Generator":
+    st.header("Generate Purchase Order")
+    if item_df.empty or foundry_df.empty:
+        st.warning("Ensure both Item Master and Foundry Master have entries.")
+    else:
+        st.subheader("1. Header Details")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            po_date = st.date_input("PO Date")
+        with col2:
+            po_no = st.text_input("PO Number")
+        with col3:
+            po_foundry = st.selectbox("Select Foundry", foundry_df["Foundry Name"].unique())
 
         st.markdown("---")
-        st.subheader(f"2. Purchase Order Timeline for '{selected_size}'")
+        st.subheader("2. Add Order Items")
+        ic1, ic2, ic3, ic4 = st.columns([3, 2, 2, 2])
+        with ic1:
+            po_item = st.selectbox("Select Item Size", item_df["Item Size"].unique())
+        with ic2:
+            po_qty = st.number_input("Order Qty (Pcs)", min_value=1, step=1)
+        with ic3:
+            po_rate = st.number_input("Rate per kg (INR)", min_value=0.0, step=0.5)
+        with ic4:
+            po_gst = st.number_input("GST Rate (%)", value=18.0, step=1.0)
 
-        if po_df.empty or selected_size not in po_df["Item Size"].values:
-            st.info(f"No Purchase Orders generated for item size: {selected_size}")
+        if st.button("➕ Add Item to PO"):
+            std_w = item_df.loc[item_df["Item Size"] == po_item, "Standard Weight per Pc (kg)"].values[0]
+            exp_w = round(po_qty * std_w, 2)
+            base_cost = exp_w * po_rate
+            total_cost = base_cost * (1 + (po_gst / 100.0))
+
+            po_entry = {
+                "Item Size": po_item, "Ordered Qty (Pcs)": po_qty,
+                "Expected Total Weight (kg)": exp_w, "Rate per kg (INR)": po_rate,
+                "GST Rate (%)": po_gst, "Total Cost (INR)": round(total_cost, 2)
+            }
+            st.session_state.current_po_items.append(po_entry)
+            st.success(f"Added {po_item} to order list.")
+
+        if st.session_state.current_po_items:
+            st.subheader("Items in Current Purchase Order")
+            temp_po_df = pd.DataFrame(st.session_state.current_po_items)
+            st.dataframe(temp_po_df, use_container_width=True)
+
+            if st.button("💾 Save Purchase Order", type="primary"):
+                if not po_no:
+                    st.error("Please enter a valid PO Number.")
+                else:
+                    new_pos = []
+                    for itm in st.session_state.current_po_items:
+                        full_po = {
+                            "PO Date": str(po_date), "PO No": po_no, "Foundry Name": po_foundry,
+                            **itm, "Received Qty (Pcs)": 0, "Pending Qty (Pcs)": itm["Ordered Qty (Pcs)"],
+                            "Status": "OPEN", "Completion Date": "-"
+                        }
+                        new_pos.append(full_po)
+                    po_df = pd.concat([po_df, pd.DataFrame(new_pos)], ignore_index=True)
+                    po_df.to_csv(PO_FILE, index=False)
+                    st.session_state.current_po_items = []
+                    st.success(f"Purchase Order {po_no} saved successfully!")
+                    st.experimental_rerun()
+
+        st.markdown("---")
+        st.subheader("Purchase Order History & Print PDF")
+        if not po_df.empty:
+            sel_po = st.selectbox("Select PO to Print PDF", po_df["PO No"].unique())
+            single_po_df = po_df[po_df["PO No"] == sel_po]
+            st.dataframe(single_po_df, use_container_width=True)
+
+            pdf_file = generate_po_pdf(sel_po, single_po_df)
+            st.download_button(
+                label="📄 Download Purchase Order PDF",
+                data=pdf_file,
+                file_name=f"PO_{sel_po}.pdf",
+                mime="application/pdf"
+            )
+
+# ----------------------------------------------------
+# 6. CHALLAN ENTRY (INCOMING CASTINGS)
+# ----------------------------------------------------
+elif menu == "🚚 Challan Entry (Incoming Castings)":
+    st.header("Incoming Castings Challan Receipt")
+    open_pos = po_df[po_df["Status"] == "OPEN"]
+    
+    if open_pos.empty:
+        st.info("No Open Purchase Orders available.")
+    else:
+        st.subheader("1. Challan & Foundry Info")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ch_date = st.date_input("Challan Date")
+            ch_no = st.text_input("Challan No.")
+        with c2:
+            ch_po = st.selectbox("Select Active PO No.", open_pos["PO No"].unique())
+            f_from_po = open_pos[open_pos["PO No"] == ch_po]["Foundry Name"].iloc[0]
+            st.text_input("Foundry Name", value=f_from_po, disabled=True)
+        with c3:
+            curr_pig_bal = get_foundry_pig_iron_balance(f_from_po)
+            st.metric("Foundry Pig Iron Balance", f"{curr_pig_bal:.2f} kg")
+
+        st.markdown("---")
+        st.subheader("2. Receive Items Against PO")
+        po_items_avail = open_pos[open_pos["PO No"] == ch_po]["Item Size"].unique()
+        
+        col1, col2, col3, col4 = st.columns([3, 2, 2, 2])
+        with col1:
+            ch_item = st.selectbox("Item Size", po_items_avail)
+        with col2:
+            ch_qty = st.number_input("Qty Received (Pcs)", min_value=1, step=1)
+        with col3:
+            ch_actual_w = st.number_input("Actual Received Weight (kg)", min_value=0.01, step=0.1)
+        with col4:
+            st.write(" ")
+            st.write(" ")
+            add_ch_item = st.button("➕ Add to Challan")
+
+        if add_ch_item:
+            std_w = item_df.loc[item_df["Item Size"] == ch_item, "Standard Weight per Pc (kg)"].values[0]
+            exp_w = round(ch_qty * std_w, 2)
+            var_w = round(ch_actual_w - exp_w, 2)
+            status_w = "OVERWEIGHT (Loss)" if var_w > 0 else ("UNDERWEIGHT (Gain)" if var_w < 0 else "EXACT MATCH")
+
+            ch_entry = {
+                "Item Size": ch_item, "Qty (Pcs)": ch_qty, "Actual Weight (kg)": ch_actual_w,
+                "Expected Weight (kg)": exp_w, "Weight Variation (kg)": var_w, "Status": status_w
+            }
+            st.session_state.current_challan_items.append(ch_entry)
+            st.success(f"Added {ch_item} to receipt list.")
+
+        if st.session_state.current_challan_items:
+            st.subheader("Current Receipt Items")
+            temp_ch_df = pd.DataFrame(st.session_state.current_challan_items)
+            st.dataframe(temp_ch_df, use_container_width=True)
+
+            if st.button("💾 Process & Save Challan", type="primary"):
+                if not ch_no:
+                    st.error("Please enter a valid Challan Number.")
+                else:
+                    new_ch_rows = []
+                    for row in st.session_state.current_challan_items:
+                        full_ch = {
+                            "Date": str(ch_date), "Challan No": ch_no, "PO No": ch_po,
+                            "Foundry Name": f_from_po, **row
+                        }
+                        new_ch_rows.append(full_ch)
+
+                        # Update PO Quantities & Status
+                        match = (po_df["PO No"] == ch_po) & (po_df["Item Size"] == row["Item Size"])
+                        if match.any():
+                            curr_rec = po_df.loc[match, "Received Qty (Pcs)"].values[0]
+                            curr_ord = po_df.loc[match, "Ordered Qty (Pcs)"].values[0]
+                            new_rec = curr_rec + row["Qty (Pcs)"]
+                            new_pend = max(0, curr_ord - new_rec)
+
+                            po_df.loc[match, "Received Qty (Pcs)"] = new_rec
+                            po_df.loc[match, "Pending Qty (Pcs)"] = new_pend
+
+                            if new_pend == 0:
+                                po_df.loc[match, "Status"] = "COMPLETED"
+                                po_df.loc[match, "Completion Date"] = str(ch_date)
+
+                    challan_df = pd.concat([challan_df, pd.DataFrame(new_ch_rows)], ignore_index=True)
+                    challan_df.to_csv(CHALLAN_FILE, index=False)
+                    po_df.to_csv(PO_FILE, index=False)
+
+                    st.session_state.current_challan_items = []
+                    st.success(f"Challan {ch_no} processed. PO balances updated successfully!")
+                    st.experimental_rerun()
+
+# ----------------------------------------------------
+# 7. PIG IRON FOUNDRY STATEMENT & PDF
+# ----------------------------------------------------
+elif menu == "📄 Pig Iron Foundry Statement & PDF":
+    st.header("Foundry Pig Iron Statement & Running Ledger")
+
+    if foundry_df.empty:
+        st.info("No foundries registered.")
+    else:
+        sel_f = st.selectbox("Select Foundry", foundry_df["Foundry Name"].unique())
+        date_opt = st.radio("Date Filter", ["All Time (Start to Date)", "Custom Date Range"])
+
+        if date_opt == "Custom Date Range":
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("Start Date", date(2025, 1, 1))
+            with col2:
+                end_date = st.date_input("End Date", date.today())
         else:
-            size_pos = po_df[po_df["Item Size"] == selected_size].copy()
-            size_pos["Fulfillment %"] = round((size_pos["Recd Qty (Pcs)"] / size_pos["Ordered Qty (Pcs)"]) * 100, 1)
+            start_date = date(2020, 1, 1)
+            end_date = date.today()
 
-            st.dataframe(size_pos[[
-                "PO No", "PO Date", "Foundry Name", "Ordered Qty (Pcs)",
-                "Recd Qty (Pcs)", "Pending Qty (Pcs)", "Fulfillment %",
-                "Status", "Completion Date"
-            ]], use_container_width=True)
+        # Build Chronological Ledger
+        opening = foundry_df[foundry_df["Foundry Name"] == sel_f]["Opening Pig Iron Balance (kg)"].values[0]
+        
+        ledger_entries = []
+        # Inwards
+        f_pigs = pig_iron_df[pig_iron_df["Unloaded Foundry"] == sel_f]
+        for _, r in f_pigs.iterrows():
+            ledger_entries.append({
+                "Date": r["Date"], "Type": "Pig Iron Inward", "Reference": f"Bill: {r['Bill/Invoice No']}",
+                "Inward (kg)": r["Pig Iron Weight (kg)"], "Outward (kg)": 0.0
+            })
+        # Outwards (Castings)
+        f_casts = challan_df[challan_df["Foundry Name"] == sel_f]
+        for _, r in f_casts.iterrows():
+            ledger_entries.append({
+                "Date": r["Date"], "Type": "Casting Consumed", "Reference": f"Challan: {r['Challan No']}",
+                "Inward (kg)": 0.0, "Outward (kg)": r["Actual Weight (kg)"]
+            })
+
+        ledger_df = pd.DataFrame(ledger_entries)
+        if not ledger_df.empty:
+            ledger_df["Date"] = pd.to_datetime(ledger_df["Date"])
+            ledger_df = ledger_df.sort_values("Date").reset_index(drop=True)
+
+            # Apply Running Balance
+            bal = opening
+            running_bals = []
+            for _, r in ledger_df.iterrows():
+                bal += r["Inward (kg)"] - r["Outward (kg)"]
+                running_bals.append(bal)
+            ledger_df["Balance (kg)"] = running_bals
+            ledger_df["Date"] = ledger_df["Date"].dt.strftime('%Y-%m-%d')
+
+            # Filter by date for display & PDF
+            mask = (pd.to_datetime(ledger_df["Date"]) >= pd.to_datetime(start_date)) & (pd.to_datetime(ledger_df["Date"]) <= pd.to_datetime(end_date))
+            filtered_ledger = ledger_df[mask]
+
+            st.dataframe(filtered_ledger, use_container_width=True)
+
+            tot_in = filtered_ledger["Inward (kg)"].sum()
+            tot_out = filtered_ledger["Outward (kg)"].sum()
+            final_b = filtered_ledger["Balance (kg)"].iloc[-1] if not filtered_ledger.empty else opening
+
+            pdf_statement = generate_pig_iron_statement_pdf(sel_f, str(start_date), str(end_date), filtered_ledger, opening, tot_in, tot_out, final_b)
+            st.download_button(
+                label="📄 Download Statement PDF",
+                data=pdf_statement,
+                file_name=f"PigIron_Statement_{sel_f}.pdf",
+                mime="application/pdf"
+            )
+        else:
+            st.info("No transaction history available for this foundry.")
+
+# ----------------------------------------------------
+# 8. ITEM SIZE REPORTS & HISTORY
+# ----------------------------------------------------
+elif menu == "🔍 Item Size Reports & History":
+    st.header("Item Size Inspection & History")
+    
+    if item_df.empty:
+        st.info("No items in master data.")
+    else:
+        sel_size = st.selectbox("Select Pulley Size to Inspect", item_df["Item Size"].unique())
+
+        tab_s1, tab_s2 = st.tabs(["🚚 Casting Receipt History", "📝 Purchase Order Timeline"])
+
+        with tab_s1:
+            st.subheader(f"Casting Arrivals for {sel_size}")
+            size_challans = challan_df[challan_df["Item Size"] == sel_size]
+            if size_challans.empty:
+                st.info("No casting receipts recorded for this size.")
+            else:
+                st.dataframe(size_challans, use_container_width=True)
+                
+                tot_p = size_challans["Qty (Pcs)"].sum()
+                tot_w = size_challans["Actual Weight (kg)"].sum()
+                net_v = size_challans["Weight Variation (kg)"].sum()
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Total Received Quantity", f"{tot_p} Pcs")
+                c2.metric("Total Weight Received", f"{tot_w:.2f} kg")
+                c3.metric("Net Weight Variation", f"{net_v:+.2f} kg", delta_color="inverse" if net_v > 0 else "normal")
+
+        with tab_s2:
+            st.subheader(f"PO Fulfillment Timeline for {sel_size}")
+            size_pos = po_df[po_df["Item Size"] == sel_size]
+            if size_pos.empty:
+                st.info("No POs issued for this size.")
+            else:
+                st.dataframe(size_pos, use_container_width=True)
