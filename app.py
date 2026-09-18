@@ -4,11 +4,30 @@ import os
 import io
 from datetime import date, datetime
 from reportlab.lib.pagesizes import letter, A4
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, HRFlowable, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 st.set_page_config(page_title="Pulley Manufacturing ERP", layout="wide")
+
+# ----------------------------------------------------
+# COMPANY LOGO CONFIGURATION
+# ----------------------------------------------------
+# Replace 'logo.png' with the actual path or filename of your company logo (PNG/JPG format)
+COMPANY_LOGO_PATH = "logo.png"
+
+def render_sidebar_logo():
+    if os.path.exists(COMPANY_LOGO_PATH):
+        st.sidebar.image(COMPANY_LOGO_PATH, use_column_width=True)
+
+def get_logo_image(width=120, height=50):
+    """Returns a ReportLab Image object if the logo exists, otherwise None."""
+    if os.path.exists(COMPANY_LOGO_PATH):
+        try:
+            return RLImage(COMPANY_LOGO_PATH, width=width, height=height)
+        except Exception:
+            return None
+    return None
 
 # File Paths for CSV Persistence
 MASTER_ITEM_FILE = "master_items.csv"
@@ -89,8 +108,17 @@ def generate_po_pdf(po_number, po_items_df):
 
     header_style = ParagraphStyle('HeaderStyle', parent=styles['Heading1'], fontSize=18, leading=22, alignment=1)
     
-    story.append(Paragraph("PURCHASE ORDER", header_style))
-    story.append(Spacer(1, 10))
+    # Add Company Logo if available
+    logo_img = get_logo_image(width=100, height=45)
+    if logo_img:
+        header_table_data = [[logo_img, Paragraph("<b>PURCHASE ORDER</b>", header_style)]]
+        header_table = Table(header_table_data, colWidths=[120, 410])
+        header_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
+        story.append(header_table)
+    else:
+        story.append(Paragraph("PURCHASE ORDER", header_style))
+
+    story.append(Spacer(1, 15))
     
     first_row = po_items_df.iloc[0]
     info_text = f"<b>PO Date:</b> {first_row['PO Date']} &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; <b>PO Number:</b> {po_number}<br/><b>To Foundry:</b> {first_row['Foundry Name']}"
@@ -138,8 +166,16 @@ def generate_pig_iron_statement_pdf(foundry_name, start_d, end_d, ledger_df, ope
     title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontSize=16, leading=20, alignment=1)
     sub_style = ParagraphStyle('SubStyle', parent=styles['Normal'], fontSize=10, leading=14, alignment=1)
 
-    story.append(Paragraph(f"PIG IRON STATEMENT: {foundry_name.upper()}", title_style))
-    story.append(Paragraph(f"Period: {start_d} to {end_d}", sub_style))
+    logo_img = get_logo_image(width=100, height=45)
+    if logo_img:
+        title_p = Paragraph(f"<b>PIG IRON STATEMENT: {foundry_name.upper()}</b><br/><font size=9>Period: {start_d} to {end_d}</font>", title_style)
+        header_table = Table([[logo_img, title_p]], colWidths=[120, 410])
+        header_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'MIDDLE')]))
+        story.append(header_table)
+    else:
+        story.append(Paragraph(f"PIG IRON STATEMENT: {foundry_name.upper()}", title_style))
+        story.append(Paragraph(f"Period: {start_d} to {end_d}", sub_style))
+
     story.append(Spacer(1, 15))
 
     summary_data = [
@@ -190,6 +226,8 @@ def generate_pig_iron_statement_pdf(foundry_name, start_d, end_d, ledger_df, ope
 # ----------------------------------------------------
 # APPLICATION INTERFACE & NAVIGATION
 # ----------------------------------------------------
+render_sidebar_logo()
+
 st.title("Pulley Manufacturing & Foundry Management System")
 
 st.sidebar.title("Navigation")
@@ -205,7 +243,7 @@ menu = st.sidebar.radio("Go to Section:", [
 ])
 
 # ----------------------------------------------------
-# 1. EXECUTIVE DASHBOARD & REPORTS (UPDATED)
+# 1. EXECUTIVE DASHBOARD & REPORTS
 # ----------------------------------------------------
 if menu == "📊 Executive Dashboard & Reports":
     st.header("Executive Operational Dashboard")
@@ -245,9 +283,7 @@ if menu == "📊 Executive Dashboard & Reports":
 
     st.markdown("---")
 
-    # ----------------------------------------------------
     # DASHBOARD VISUAL ANALYTICS & CHARTS
-    # ----------------------------------------------------
     st.subheader("📈 Real-Time Material & Casting Analytics")
 
     col_chart1, col_chart2 = st.columns(2)
